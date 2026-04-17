@@ -707,9 +707,36 @@ async fn cmd_local_monitor(
             .with_context(|| format!("Failed to bind UDP port {port}"))?,
     );
 
+    println!("Waiting for device packets...");
+    println!();
+
+    let mut buf = [0u8; 256];
+
+    // If MQTT is enabled but no --mac, learn device ID from first packet
+    let mac_id = if mqtt_enabled && mac.is_none() {
+        let (len, addr) = sock.recv_from(&mut buf).await?;
+        let data = &buf[..len];
+
+        // Echo back so device stays connected
+        if let Some(echo) = build_echo(data) {
+            let _ = sock.send_to(&echo, addr).await;
+        }
+
+        if let Some(id_bytes) = protocol::udp::parse_device_id_bytes(data) {
+            let id: String = id_bytes.iter().map(|b| format!("{b:02X}")).collect();
+            println!("[mqtt] Learned device ID from first packet: {id}");
+            Some(id)
+        } else {
+            println!("[mqtt] Warning: Could not parse device ID from first packet, using 'unknown'");
+            None
+        }
+    } else {
+        mac.clone()
+    };
+
     // Start MQTT publisher task if enabled
     let mqtt_tx = if mqtt_enabled {
-        let mac_id = mac.clone().unwrap_or_else(|| "unknown".to_string());
+        let mac_id = mac_id.unwrap_or_else(|| "unknown".to_string());
         let (tx, mut rx) = tokio::sync::mpsc::channel::<udp::DevicePacket>(64);
         let mqtt_host = mqtt_host.to_string();
         let mqtt_user = mqtt_user.clone();
@@ -735,10 +762,6 @@ async fn cmd_local_monitor(
         None
     };
 
-    println!("Waiting for device packets...");
-    println!();
-
-    let mut buf = [0u8; 256];
     loop {
         let (len, addr) = sock.recv_from(&mut buf).await?;
         let data = &buf[..len];
