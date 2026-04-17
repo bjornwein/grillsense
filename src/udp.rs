@@ -22,8 +22,8 @@ use crate::protocol;
 /// Parsed data from a device packet.
 #[derive(Debug, Clone)]
 pub struct DevicePacket {
-    pub source: SocketAddr,
-    pub raw: Vec<u8>,
+    pub _source: SocketAddr,
+    pub _raw: Vec<u8>,
     pub direction: PacketDirection,
     pub parsed: Option<ParsedData>,
 }
@@ -113,8 +113,8 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 // Send to consumer (MQTT, etc.)
                 if let Some(ref tx) = config.packet_tx {
                     let pkt = DevicePacket {
-                        source: src,
-                        raw: data.to_vec(),
+                        _source: src,
+                        _raw: data.to_vec(),
                         direction: PacketDirection::DeviceToCloud,
                         parsed: parsed.clone(),
                     };
@@ -122,11 +122,10 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 }
 
                 // Forward to cloud
-                if config.forward_to_cloud {
-                    if let Err(e) = cloud_socket.send_to(data, config.cloud_addr).await {
+                if config.forward_to_cloud
+                    && let Err(e) = cloud_socket.send_to(data, config.cloud_addr).await {
                         eprintln!("  [!] Cloud forward failed: {e}");
                     }
-                }
             }
 
             // Responses from the cloud
@@ -140,8 +139,8 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 // Send to consumer
                 if let Some(ref tx) = config.packet_tx {
                     let pkt = DevicePacket {
-                        source: src,
-                        raw: data.to_vec(),
+                        _source: src,
+                        _raw: data.to_vec(),
                         direction: PacketDirection::CloudToDevice,
                         parsed: try_parse(data),
                     };
@@ -149,11 +148,10 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 }
 
                 // Forward back to the device
-                if let Some(dev) = device_addr {
-                    if let Err(e) = listen_socket.send_to(data, dev).await {
+                if let Some(dev) = device_addr
+                    && let Err(e) = listen_socket.send_to(data, dev).await {
                         eprintln!("  [!] Device forward failed: {e}");
                     }
-                }
             }
         }
     }

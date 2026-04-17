@@ -122,10 +122,7 @@ impl MqttHaConfig {
     }
 
     /// Generate a state payload from temperature data.
-    pub fn state_payload(
-        &self,
-        temp: &crate::protocol::TempResult,
-    ) -> String {
+    pub fn state_payload(&self, temp: &crate::protocol::TempResult) -> String {
         serde_json::to_string(&json!({
             "temperature_ch1": temp.temperature_ch1,
             "temperature_ch2": temp.temperature_ch2,
@@ -179,8 +176,7 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
     println!("Published HA discovery config for 7 entities (6 probes + online)");
 
     // Publish online availability
-    let avail_packet =
-        build_mqtt_publish(&config.availability_topic(), b"online", true);
+    let avail_packet = build_mqtt_publish(&config.availability_topic(), b"online", true);
     stream.write_all(&avail_packet).await?;
 
     println!(
@@ -193,17 +189,13 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
         match client.get_temperature().await {
             Ok(temp) => {
                 let payload = config.state_payload(&temp);
-                let packet =
-                    build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
+                let packet = build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
                 stream.write_all(&packet).await?;
 
                 // Also update availability
                 let status = if temp.online() { "online" } else { "offline" };
-                let avail = build_mqtt_publish(
-                    &config.availability_topic(),
-                    status.as_bytes(),
-                    true,
-                );
+                let avail =
+                    build_mqtt_publish(&config.availability_topic(), status.as_bytes(), true);
                 stream.write_all(&avail).await?;
             }
             Err(e) => {
@@ -216,11 +208,7 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
 
         // Read any pending data (PINGRESP, etc.) — non-blocking
         let mut resp_buf = [0u8; 256];
-        let _ = tokio::time::timeout(
-            Duration::from_millis(100),
-            stream.read(&mut resp_buf),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), stream.read(&mut resp_buf)).await;
 
         tokio::time::sleep(config.poll_interval).await;
     }

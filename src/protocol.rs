@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-/// Protocol constants and types for the GrillSense thermometer.
+//! Protocol constants and types for the GrillSense thermometer.
 
 /// Cloud API base host.
 pub const CLOUD_HOST: &str = "smartserver.emaxtime.cn";
@@ -40,7 +40,7 @@ pub mod ble {
             cmd.to_string()
         };
         let bytes = data.as_bytes();
-        let total_chunks = (bytes.len() + MAX_CHUNK_PAYLOAD - 1) / MAX_CHUNK_PAYLOAD;
+        let total_chunks = bytes.len().div_ceil(MAX_CHUNK_PAYLOAD);
         let total_chunks = total_chunks.min(3) as u8;
 
         let mut chunks = Vec::new();
@@ -85,8 +85,8 @@ pub mod udp {
 
     // Binary packet framing
     pub const START_BYTE: u8 = 0x3C; // '<'
-    pub const END_BYTE: u8 = 0x3E;   // '>'
-    pub const TYPE_TEMP: u8 = 0x54;   // 'T' — temperature packet
+    pub const END_BYTE: u8 = 0x3E; // '>'
+    pub const TYPE_TEMP: u8 = 0x54; // 'T' — temperature packet
 
     /// Fixed packet length for temperature reports.
     pub const TEMP_PACKET_LEN: usize = 18;
@@ -251,7 +251,7 @@ pub mod udp {
         pkt.push(0x00); // direction
         pkt.push(0x02); // data byte count
         pkt.push(0x00); // high byte / padding
-        pkt.push((raw_temp & 0xFF) as u8);        // low byte (LE)
+        pkt.push((raw_temp & 0xFF) as u8); // low byte (LE)
         pkt.push(((raw_temp >> 8) & 0xFF) as u8); // high byte (LE)
         let checksum = compute_checksum(&pkt[1..]);
         pkt.push(checksum);
@@ -358,9 +358,7 @@ impl TempResult {
 ///
 /// This is confirmed to work with the cloud API for G002 (HF-LPT230) devices.
 pub fn wifi_mac_to_device_id(wifi_mac: &str) -> String {
-    let stripped = wifi_mac
-        .replace([':', '-'], "")
-        .to_uppercase();
+    let stripped = wifi_mac.replace([':', '-'], "").to_uppercase();
     if stripped.len() >= 12 {
         format!("02{}", &stripped[4..])
     } else {
@@ -434,10 +432,11 @@ impl ApiError {
         if let Some(info) = &self.info {
             parts.push(info.clone());
         }
-        if let Some(result) = self.result {
-            if result != 0 && self.error_code.is_none() {
-                parts.push(format!("result code {result}"));
-            }
+        if let Some(result) = self.result
+            && result != 0
+            && self.error_code.is_none()
+        {
+            parts.push(format!("result code {result}"));
         }
         if parts.is_empty() {
             "unknown error".to_string()
@@ -555,9 +554,8 @@ mod tests {
     fn test_udp_packet_parse() {
         // Real captured packet from device
         let data: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
-            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
-            0x99, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30, 0x30, 0x00, 0x04, 0x00, 0xD8, 0x00,
+            0x00, 0x00, 0x99, 0x3E,
         ];
         let pkt = udp::TempPacket::parse(&data).expect("should parse");
         assert_eq!(pkt.device_id, "02CC445566");
@@ -570,9 +568,8 @@ mod tests {
     fn test_udp_packet_parse_cloud_echo() {
         // Cloud echo has direction=1 and adjusted checksum
         let data: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
-            0x30, 0x01, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
-            0x9A, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30, 0x30, 0x01, 0x04, 0x00, 0xD8, 0x00,
+            0x00, 0x00, 0x9A, 0x3E,
         ];
         let pkt = udp::TempPacket::parse(&data).expect("should parse cloud echo");
         assert_eq!(pkt.direction, udp::DIR_CLOUD_TO_DEVICE);
@@ -594,8 +591,8 @@ mod tests {
     fn test_udp_checksum() {
         // Verify checksum computation matches captured data
         let content: Vec<u8> = vec![
-            0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
-            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
+            0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30, 0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00,
+            0x00,
         ];
         assert_eq!(udp::compute_checksum(&content), 0x99);
     }
@@ -603,9 +600,8 @@ mod tests {
     #[test]
     fn test_udp_to_temp_result() {
         let data: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
-            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
-            0x99, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30, 0x30, 0x00, 0x04, 0x00, 0xD8, 0x00,
+            0x00, 0x00, 0x99, 0x3E,
         ];
         let pkt = udp::TempPacket::parse(&data).unwrap();
         let result = pkt.to_temp_result();
@@ -618,8 +614,8 @@ mod tests {
     fn test_alarm_packet_parse_75c() {
         // Alarm packet: cloud set 75°C on channel 1 (anonymized device ID)
         let data: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
-            0x31, 0x00, 0x02, 0x00, 0xEE, 0x02, 0xC1, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41, 0x31, 0x00, 0x02, 0x00, 0xEE, 0x02,
+            0xC1, 0x3E,
         ];
         let (ch, temp) = udp::parse_alarm_packet(&data).expect("should parse");
         assert_eq!(ch, 1);
@@ -630,8 +626,8 @@ mod tests {
     fn test_alarm_packet_parse_100c() {
         // Alarm packet: cloud set 100°C on channel 1 (anonymized device ID)
         let data: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
-            0x31, 0x00, 0x02, 0x00, 0xE8, 0x03, 0xBC, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41, 0x31, 0x00, 0x02, 0x00, 0xE8, 0x03,
+            0xBC, 0x3E,
         ];
         let (ch, temp) = udp::parse_alarm_packet(&data).expect("should parse");
         assert_eq!(ch, 1);
@@ -654,8 +650,8 @@ mod tests {
         let dev_id: [u8; 5] = [0x02, 0xCC, 0x44, 0x55, 0x66];
         let pkt = udp::build_alarm_packet(&dev_id, 1, 75.0);
         let expected: Vec<u8> = vec![
-            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
-            0x31, 0x00, 0x02, 0x00, 0xEE, 0x02, 0xC1, 0x3E,
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41, 0x31, 0x00, 0x02, 0x00, 0xEE, 0x02,
+            0xC1, 0x3E,
         ];
         assert_eq!(pkt, expected);
     }

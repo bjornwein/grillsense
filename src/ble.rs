@@ -7,7 +7,6 @@
 ///
 /// NOTE: This module requires the `ble` feature and the btleplug crate.
 /// It is structured as a standalone module that can be enabled later.
-
 use crate::protocol::ble::*;
 
 /// BLE provisioning configuration.
@@ -114,7 +113,7 @@ impl ProvisionStep {
     /// Extract the MAC address from a GetMac response ("+ok=AA:BB:CC:DD:EE:FF").
     pub fn parse_mac_response(response: &str) -> Option<String> {
         if response.starts_with("+ok=") {
-            Some(response[4..].to_string())
+            Some(response.strip_prefix("+ok=").unwrap().to_string())
         } else {
             None
         }
@@ -181,8 +180,7 @@ mod tests {
 
     #[test]
     fn test_packets_for_step() {
-        let config =
-            ProvisionConfig::cloud_default("TestSSID".into(), "TestPassword".into());
+        let config = ProvisionConfig::cloud_default("TestSSID".into(), "TestPassword".into());
 
         let packets = packets_for_step(ProvisionStep::EnterAtMode, &config);
         assert_eq!(packets.len(), 1);

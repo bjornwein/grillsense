@@ -226,8 +226,6 @@ enum LocalCommands {
         #[arg(long)]
         ch2: Option<f64>,
     },
-
-
 }
 
 #[tokio::main]
@@ -280,9 +278,7 @@ async fn main() -> Result<()> {
                 server,
                 server_port,
                 no_reboot,
-            } => {
-                cmd_configure(&ip, &ssid, &wifi_password, &server, server_port, !no_reboot).await
-            }
+            } => cmd_configure(&ip, &ssid, &wifi_password, &server, server_port, !no_reboot).await,
             LocalCommands::Proxy {
                 port,
                 no_forward,
@@ -310,11 +306,7 @@ async fn main() -> Result<()> {
             LocalCommands::Monitor { port, fahrenheit } => {
                 cmd_local_monitor(port, fahrenheit).await
             }
-            LocalCommands::SetAlarm {
-                port,
-                ch1,
-                ch2,
-            } => cmd_local_set_alarm(port, ch1, ch2).await,
+            LocalCommands::SetAlarm { port, ch1, ch2 } => cmd_local_set_alarm(port, ch1, ch2).await,
         },
         Commands::BleProvision {
             ssid,
@@ -359,7 +351,10 @@ async fn cmd_devices(token: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<4} {:<20} {:<8} {:<16} {}", "ID", "MAC", "Online", "IP", "Location");
+    println!(
+        "{:<4} {:<20} {:<8} {:<16} Location",
+        "ID", "MAC", "Online", "IP"
+    );
     println!("{}", "-".repeat(70));
     for dev in &devices {
         println!(
@@ -431,7 +426,10 @@ async fn cmd_cloud_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bo
             }
             Err(e) => {
                 consecutive_errors += 1;
-                eprint!("\r[error] {} (attempt {})                ", e, consecutive_errors);
+                eprint!(
+                    "\r[error] {} (attempt {})                ",
+                    e, consecutive_errors
+                );
                 io::stderr().flush().ok();
                 if consecutive_errors >= 10 {
                     println!();
@@ -480,7 +478,10 @@ async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
         println!("{}", "-".repeat(56));
         for dev in &devices {
             let dev_id = protocol::wifi_mac_to_device_id(&dev.mac);
-            println!("{:<16} {:<14} {:<12} {:<12}", dev.ip, dev.mac, dev.model, dev_id);
+            println!(
+                "{:<16} {:<14} {:<12} {:<12}",
+                dev.ip, dev.mac, dev.model, dev_id
+            );
         }
         println!();
         if devices.len() == 1 {
@@ -533,7 +534,11 @@ fn cmd_protocol() {
     println!("===========================");
     println!();
     println!("Cloud API: {}", protocol::CLOUD_BASE_URL);
-    println!("Cloud UDP: {}:{}", protocol::CLOUD_HOST, protocol::udp::CLOUD_PORT);
+    println!(
+        "Cloud UDP: {}:{}",
+        protocol::CLOUD_HOST,
+        protocol::udp::CLOUD_PORT
+    );
     println!();
     println!("BLE Service:  {}", protocol::ble::SERVICE_UUID);
     println!("BLE Notify:   {}", protocol::ble::NOTIFY_UUID);
@@ -562,8 +567,10 @@ fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, lo
     ble::print_provision_sequence(&config);
     println!();
     if local_ip.is_some() {
-        println!("NOTE: Device will be configured to send data to {}:{}", 
-            config.server_host, config.server_port);
+        println!(
+            "NOTE: Device will be configured to send data to {}:{}",
+            config.server_host, config.server_port
+        );
         println!("Run 'grillsense local proxy' on that host to receive data.");
     } else {
         println!("NOTE: Device will be configured to send data to the cloud server.");
@@ -573,6 +580,7 @@ fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, lo
     println!("This is a dry-run showing the command sequence.");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_cloud_bridge(
     token: &str,
     mac: &str,
@@ -606,6 +614,7 @@ async fn cmd_cloud_bridge(
     mqtt::run_bridge(&config, &client).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_proxy(
     port: u16,
     forward: bool,
@@ -628,7 +637,9 @@ async fn cmd_proxy(
     println!("  MQTT:    {mqtt_enabled}");
     println!();
     println!("Configure device to send here:");
-    println!("  grillsense local configure --ip <device-ip> --ssid <ssid> -P <pass> --server <this-ip> --server-port {port}");
+    println!(
+        "  grillsense local configure --ip <device-ip> --ssid <ssid> -P <pass> --server <this-ip> --server-port {port}"
+    );
     println!();
 
     let (packet_tx, mut packet_rx) = mpsc::channel::<udp::DevicePacket>(64);
@@ -714,7 +725,11 @@ async fn cmd_local_monitor(port: u16, fahrenheit: bool) -> Result<()> {
             let temps: Vec<String> = active
                 .iter()
                 .map(|(ch, t)| {
-                    let val = if fahrenheit { *t * 9.0 / 5.0 + 32.0 } else { *t };
+                    let val = if fahrenheit {
+                        *t * 9.0 / 5.0 + 32.0
+                    } else {
+                        *t
+                    };
                     let unit = if fahrenheit { "°F" } else { "°C" };
                     format!("CH{ch}: {val:.1}{unit}")
                 })
@@ -908,21 +923,13 @@ async fn mqtt_proxy_publisher(
             let temp_result = temp_pkt.to_temp_result();
             let payload = config.state_payload(&temp_result);
 
-            let packet = mqtt::build_mqtt_publish(
-                &config.state_topic(),
-                payload.as_bytes(),
-                false,
-            );
+            let packet = mqtt::build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
             stream.write_all(&packet).await?;
 
             // Keepalive
             stream.write_all(&[0xC0, 0x00]).await?;
             let mut resp = [0u8; 64];
-            let _ = tokio::time::timeout(
-                Duration::from_millis(50),
-                stream.read(&mut resp),
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_millis(50), stream.read(&mut resp)).await;
         }
     }
 
@@ -941,4 +948,3 @@ fn chrono_lite_now() -> String {
     let s = secs % 60;
     format!("{hours:02}:{mins:02}:{s:02}")
 }
-

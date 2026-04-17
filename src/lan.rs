@@ -16,7 +16,7 @@ pub struct DeviceDiscovery {
     pub ip: String,
     pub mac: String,
     pub model: String,
-    pub source: SocketAddr,
+    pub _source: SocketAddr,
 }
 
 /// Discover HF modules on the local network via broadcast.
@@ -44,18 +44,13 @@ pub async fn discover_broadcast(timeout_secs: u64) -> Result<Vec<DeviceDiscovery
     let mut buf = [0u8; 512];
     let deadline = Duration::from_secs(timeout_secs);
 
-    loop {
-        match timeout(deadline, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, src))) => {
-                let text = String::from_utf8_lossy(&buf[..len]);
-                if let Some(dev) = parse_discovery_response(&text, src) {
-                    // Deduplicate by MAC
-                    if !devices.iter().any(|d: &DeviceDiscovery| d.mac == dev.mac) {
-                        devices.push(dev);
-                    }
-                }
+    while let Ok(Ok((len, src))) = timeout(deadline, socket.recv_from(&mut buf)).await {
+        let text = String::from_utf8_lossy(&buf[..len]);
+        if let Some(dev) = parse_discovery_response(&text, src) {
+            // Deduplicate by MAC
+            if !devices.iter().any(|d: &DeviceDiscovery| d.mac == dev.mac) {
+                devices.push(dev);
             }
-            _ => break,
         }
     }
 
@@ -94,7 +89,7 @@ fn parse_discovery_response(text: &str, src: SocketAddr) -> Option<DeviceDiscove
             ip: parts[0].to_string(),
             mac: parts[1].to_string(),
             model: parts[2].to_string(),
-            source: src,
+            _source: src,
         })
     } else {
         None
@@ -134,9 +129,7 @@ pub async fn send_at_commands(ip: &str, commands: &[&str]) -> Result<Vec<String>
 
     // Step 2: Enter AT mode
     tokio::time::sleep(Duration::from_millis(200)).await;
-    socket
-        .send_to(lan::AT_MODE_ENTER.as_bytes(), dest)
-        .await?;
+    socket.send_to(lan::AT_MODE_ENTER.as_bytes(), dest).await?;
     // Try to consume any AT mode acknowledgment (some firmwares send one)
     let _ = timeout(Duration::from_millis(500), socket.recv_from(&mut buf)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -163,7 +156,14 @@ pub async fn send_at_commands(ip: &str, commands: &[&str]) -> Result<Vec<String>
 /// Query all device settings and return them as a formatted report.
 pub async fn query_device_info(ip: &str) -> Result<String> {
     let labels = [
-        "MAC", "SSID", "WiFi Key", "Network", "Mode", "UART", "Firmware", "TCP Timeout",
+        "MAC",
+        "SSID",
+        "WiFi Key",
+        "Network",
+        "Mode",
+        "UART",
+        "Firmware",
+        "TCP Timeout",
     ];
     let commands = [
         "AT+WSMAC",

@@ -73,10 +73,10 @@ impl CloudClient {
         let text = resp.text().await.context("Failed to read login response")?;
 
         // Check for error response
-        if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-            if err.is_error() {
-                bail!("Login failed: {}", err.description());
-            }
+        if let Ok(err) = serde_json::from_str::<ApiError>(&text)
+            && err.is_error()
+        {
+            bail!("Login failed: {}", err.description());
         }
 
         let user: UserInfo =
@@ -115,14 +115,12 @@ impl CloudClient {
             .context("Bind device request failed")?;
 
         let text = resp.text().await?;
-        if text != "{}" {
-            if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-                if let Some(code) = err.result {
-                    if code != 0 {
-                        bail!("Bind failed with code: {}", code);
-                    }
-                }
-            }
+        if text != "{}"
+            && let Ok(err) = serde_json::from_str::<ApiError>(&text)
+            && let Some(code) = err.result
+            && code != 0
+        {
+            bail!("Bind failed with code: {}", code);
         }
         Ok(())
     }
@@ -143,14 +141,12 @@ impl CloudClient {
             .context("Unbind device request failed")?;
 
         let text = resp.text().await?;
-        if text != "{}" {
-            if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-                if let Some(code) = err.result {
-                    if code != 0 {
-                        bail!("Unbind failed with code: {}", code);
-                    }
-                }
-            }
+        if text != "{}"
+            && let Ok(err) = serde_json::from_str::<ApiError>(&text)
+            && let Some(code) = err.result
+            && code != 0
+        {
+            bail!("Unbind failed with code: {}", code);
         }
         Ok(())
     }
@@ -173,10 +169,10 @@ impl CloudClient {
             .context("Failed to read temperature response")?;
 
         // Check for error response
-        if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-            if err.is_error() {
-                bail!("Cloud API error: {}", err.description());
-            }
+        if let Ok(err) = serde_json::from_str::<ApiError>(&text)
+            && err.is_error()
+        {
+            bail!("Cloud API error: {}", err.description());
         }
 
         let temp: TempResult =
@@ -226,13 +222,10 @@ fn md5_hex(input: &str) -> String {
 // Tiny hex encoder to avoid pulling in the `hex` crate.
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .fold(String::new(), |mut s, b| {
-                use std::fmt::Write;
-                let _ = write!(s, "{b:02x}");
-                s
-            })
+        bytes.as_ref().iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
     }
 }
