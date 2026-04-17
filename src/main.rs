@@ -1,5 +1,8 @@
+mod ble;
 mod cloud;
+mod mqtt;
 mod protocol;
+mod udp;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -61,6 +64,57 @@ enum Commands {
         temp: f64,
     },
 
+    /// Listen for UDP packets from the device (requires traffic redirection)
+    UdpListen {
+        /// UDP port to listen on
+        #[arg(short, long, default_value = "17000")]
+        port: u16,
+    },
+
+    /// Show BLE provisioning sequence (dry-run)
+    BleProvision {
+        /// WiFi SSID to configure
+        #[arg(short = 's', long)]
+        ssid: String,
+        /// WiFi password
+        #[arg(short = 'p', long)]
+        wifi_password: String,
+        /// Local server IP (omit to use cloud server)
+        #[arg(short, long)]
+        local_ip: Option<String>,
+        /// Local server port
+        #[arg(short = 'P', long, default_value = "17000")]
+        local_port: u16,
+    },
+
+    /// Bridge temperature data to Home Assistant via MQTT
+    HaBridge {
+        /// Auth token (from login)
+        #[arg(short, long)]
+        token: String,
+        /// Device MAC address
+        #[arg(short, long)]
+        mac: String,
+        /// MQTT broker host
+        #[arg(long, default_value = "localhost")]
+        mqtt_host: String,
+        /// MQTT broker port
+        #[arg(long, default_value = "1883")]
+        mqtt_port: u16,
+        /// MQTT username
+        #[arg(long)]
+        mqtt_user: Option<String>,
+        /// MQTT password
+        #[arg(long)]
+        mqtt_pass: Option<String>,
+        /// Device name in Home Assistant
+        #[arg(long, default_value = "BBQ Thermometer")]
+        device_name: String,
+        /// Polling interval in seconds
+        #[arg(short, long, default_value = "3")]
+        interval: u64,
+    },
+
     /// Show protocol information
     Protocol,
 }
@@ -79,6 +133,38 @@ async fn main() -> Result<()> {
             fahrenheit,
         } => cmd_monitor(&token, &mac, interval, fahrenheit).await,
         Commands::SetAlarm { token, mac, temp } => cmd_set_alarm(&token, &mac, temp).await,
+        Commands::UdpListen { port } => udp::listen(port).await,
+        Commands::BleProvision {
+            ssid,
+            wifi_password,
+            local_ip,
+            local_port,
+        } => {
+            cmd_ble_provision(&ssid, &wifi_password, local_ip.as_deref(), local_port);
+            Ok(())
+        }
+        Commands::HaBridge {
+            token,
+            mac,
+            mqtt_host,
+            mqtt_port,
+            mqtt_user,
+            mqtt_pass,
+            device_name,
+            interval,
+        } => {
+            cmd_ha_bridge(
+                &token,
+                &mac,
+                &mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                &device_name,
+                interval,
+            )
+            .await
+        }
         Commands::Protocol => {
             cmd_protocol();
             Ok(())
@@ -221,6 +307,65 @@ fn cmd_protocol() {
     println!("AP Mode Port: {}", protocol::ap::DEFAULT_PORT);
     println!();
     println!("See PROTOCOL.md for full documentation.");
+}
+
+fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, local_port: u16) {
+    let config = if let Some(ip) = local_ip {
+        ble::ProvisionConfig::local(
+            ssid.to_string(),
+            wifi_password.to_string(),
+            ip.to_string(),
+            local_port,
+        )
+    } else {
+        ble::ProvisionConfig::cloud_default(ssid.to_string(), wifi_password.to_string())
+    };
+
+    ble::print_provision_sequence(&config);
+    println!();
+    if local_ip.is_some() {
+        println!("NOTE: Device will be configured to send data to {}:{}", 
+            config.server_host, config.server_port);
+        println!("Run 'grillsense udp-listen' on that host to receive data.");
+    } else {
+        println!("NOTE: Device will be configured to send data to the cloud server.");
+    }
+    println!();
+    println!("BLE provisioning requires a Bluetooth adapter and the btleplug runtime.");
+    println!("This is a dry-run showing the command sequence.");
+}
+
+async fn cmd_ha_bridge(
+    token: &str,
+    mac: &str,
+    mqtt_host: &str,
+    mqtt_port: u16,
+    mqtt_user: Option<String>,
+    mqtt_pass: Option<String>,
+    device_name: &str,
+    interval: u64,
+) -> Result<()> {
+    let mut client = cloud::CloudClient::new()?;
+    client.set_token(token.to_string());
+    client.set_device_mac(mac.to_string());
+
+    let config = mqtt::MqttHaConfig {
+        broker_host: mqtt_host.to_string(),
+        broker_port: mqtt_port,
+        username: mqtt_user,
+        password: mqtt_pass,
+        device_name: device_name.to_string(),
+        device_id: mac.to_string(),
+        poll_interval: Duration::from_secs(interval),
+    };
+
+    println!("Starting Home Assistant MQTT bridge");
+    println!("  Device:   {} ({})", device_name, mac);
+    println!("  Broker:   {}:{}", mqtt_host, mqtt_port);
+    println!("  Interval: {}s", interval);
+    println!();
+
+    mqtt::run_bridge(&config, &client).await
 }
 
 /// Simple timestamp without pulling in chrono.
