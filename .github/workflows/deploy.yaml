@@ -1,0 +1,106 @@
+---
+name: Deploy
+
+on:
+  release:
+    types:
+      - published
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: deploy
+
+jobs:
+  information:
+    name: ℹ️ Gather add-on information
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      environment: ${{ steps.release.outputs.environment }}
+    steps:
+      - name: ℹ️ Gather version and environment
+        id: release
+        run: |
+          sha="${{ github.sha }}"
+          environment="edge"
+          version="${sha:0:7}"
+          if [[ "${{ github.event_name }}" = "release" ]]; then
+            version="${{ github.event.release.tag_name }}"
+            version="${version,,}"
+            version="${version#v}"
+            environment="stable"
+          fi
+          echo "environment=$environment" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: 👷 Build & Deploy ${{ matrix.architecture }}
+    needs: information
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        architecture:
+          - amd64
+          - aarch64
+        include:
+          - architecture: amd64
+            platform: linux/amd64
+          - architecture: aarch64
+            platform: linux/arm64/v8
+    steps:
+      - name: ⤵️ Check out code
+        uses: actions/checkout@v4
+      - name: 🏗 Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: 🏗 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: 🏗 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 🚀 Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/grillsense/${{ matrix.architecture }}:${{ needs.information.outputs.environment }}
+            ghcr.io/${{ github.repository_owner }}/grillsense/${{ matrix.architecture }}:${{ needs.information.outputs.version }}
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=grillsense-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=grillsense-${{ matrix.architecture }}
+          build-args: |
+            BUILD_FROM=ghcr.io/hassio-addons/base:latest
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            BUILD_DESCRIPTION=GrillSense WiFi BBQ thermometer integration for Home Assistant
+            BUILD_NAME=GrillSense Thermometer
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=${{ needs.information.outputs.version }}
+
+  notify:
+    name: 📢 Notify ha-apps repository
+    if: needs.information.outputs.environment == 'stable'
+    needs:
+      - information
+      - deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🚀 Dispatch update signal
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HA_APPS_TOKEN }}
+          repository: bjornwein/ha-apps
+          event-type: update
+          client-payload: >
+            {
+              "addon": "grillsense",
+              "name": "GrillSense Thermometer",
+              "repository": "${{ github.repository }}",
+              "version": "${{ needs.information.outputs.version }}"
+            }
