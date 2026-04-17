@@ -214,7 +214,7 @@ enum LocalCommands {
         fahrenheit: bool,
     },
 
-    /// Set local alarm — alerts when temperature exceeds threshold
+    /// Set device alarm by sending the alarm packet directly (WIP: use 'capture' first)
     SetAlarm {
         /// UDP port to listen on
         #[arg(short, long, default_value = "17000")]
@@ -225,9 +225,23 @@ enum LocalCommands {
         /// Alarm threshold for channel 2 (°C)
         #[arg(long)]
         ch2: Option<f64>,
-        /// Forward packets to cloud while monitoring
-        #[arg(long)]
-        forward: bool,
+    },
+
+    /// Capture cloud→device packets while triggering a cloud set-alarm.
+    /// Used to reverse-engineer the alarm packet format.
+    Capture {
+        /// UDP port to listen on (device must be sending through us)
+        #[arg(short, long, default_value = "17000")]
+        port: u16,
+        /// Device WiFi MAC address
+        #[arg(short, long)]
+        mac: String,
+        /// Alarm temperature to set via cloud (°C)
+        #[arg(short = 'T', long)]
+        temp: f64,
+        /// Seconds to capture after triggering alarm
+        #[arg(short, long, default_value = "10")]
+        duration: u64,
     },
 }
 
@@ -315,8 +329,13 @@ async fn main() -> Result<()> {
                 port,
                 ch1,
                 ch2,
-                forward,
-            } => cmd_local_set_alarm(port, ch1, ch2, forward).await,
+            } => cmd_local_set_alarm(port, ch1, ch2).await,
+            LocalCommands::Capture {
+                port,
+                mac,
+                temp,
+                duration,
+            } => cmd_capture(port, &mac, temp, duration).await,
         },
         Commands::BleProvision {
             ssid,
@@ -703,6 +722,11 @@ async fn cmd_local_monitor(port: u16, fahrenheit: bool) -> Result<()> {
         let (len, addr) = sock.recv_from(&mut buf).await?;
         let data = &buf[..len];
 
+        // Echo back so device stays connected
+        if let Some(echo) = build_echo(data) {
+            let _ = sock.send_to(&echo, addr).await;
+        }
+
         if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
             let active = pkt.active_channels();
             if active.is_empty() {
@@ -727,83 +751,284 @@ async fn cmd_local_set_alarm(
     port: u16,
     ch1_threshold: Option<f64>,
     ch2_threshold: Option<f64>,
-    forward: bool,
 ) -> Result<()> {
     if ch1_threshold.is_none() && ch2_threshold.is_none() {
         anyhow::bail!("At least one threshold required: --ch1 <temp> and/or --ch2 <temp>");
     }
 
-    println!("GrillSense Local Alarm");
-    println!("======================");
-    if let Some(t) = ch1_threshold {
-        println!("  CH1 alarm: ≥ {t:.1}°C");
-    }
-    if let Some(t) = ch2_threshold {
-        println!("  CH2 alarm: ≥ {t:.1}°C");
-    }
-    println!("  Listen:    0.0.0.0:{port}");
-    println!("  Forward:   {forward}");
+    // TODO: Once we've captured the alarm packet format (via 'local capture'),
+    // this will construct and send the alarm packet directly to the device.
+    // For now, print what we know and explain next steps.
+    println!("GrillSense Local Set-Alarm");
+    println!("==========================");
+    println!();
+    println!("The device has a built-in alarm that buzzes when temperature");
+    println!("exceeds a threshold. The cloud pushes this threshold to the");
+    println!("device via the UDP channel.");
+    println!();
+    println!("To reverse-engineer the alarm packet format, run:");
+    println!();
+    println!("  grillsense local capture --mac <WIFI_MAC> -T {:.1} --port {port}",
+        ch1_threshold.or(ch2_threshold).unwrap_or(75.0));
+    println!();
+    println!("This will proxy device traffic through the cloud while");
+    println!("triggering a cloud set-alarm, and capture any new packet");
+    println!("types the cloud sends to the device.");
+    Ok(())
+}
+
+/// Capture cloud→device packets while triggering a cloud set-alarm.
+/// Proxies traffic and highlights anything that's NOT a standard echo.
+async fn cmd_capture(port: u16, mac: &str, alarm_temp: f64, duration_secs: u64) -> Result<()> {
+    use std::sync::Arc;
+    use tokio::net::UdpSocket;
+
+    println!("GrillSense Alarm Packet Capture");
+    println!("===============================");
+    println!("  Listen:     0.0.0.0:{port}");
+    println!("  Device MAC: {mac}");
+    println!("  Alarm temp: {alarm_temp:.1}°C");
+    println!("  Duration:   {duration_secs}s after trigger");
     println!();
 
-    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
-        .await
-        .with_context(|| format!("Failed to bind UDP port {port}"))?;
-
-    let cloud_addr = if forward {
-        Some(udp::resolve_cloud_addr().await?)
-    } else {
-        None
-    };
-
-    let mut ch1_alarmed = false;
-    let mut ch2_alarmed = false;
-    let mut buf = [0u8; 256];
-
-    println!("Waiting for device packets...");
+    let cloud_addr = udp::resolve_cloud_addr().await?;
+    println!("  Cloud:      {cloud_addr}");
     println!();
 
-    loop {
-        let (len, addr) = sock.recv_from(&mut buf).await?;
-        let data = &buf[..len];
+    // Bind listen socket
+    let listen_sock = Arc::new(
+        UdpSocket::bind(("0.0.0.0", port))
+            .await
+            .with_context(|| format!("Failed to bind UDP port {port}"))?,
+    );
 
-        // Forward to cloud if enabled
-        if let Some(ref cloud) = cloud_addr {
-            let _ = sock.send_to(data, cloud).await;
-        }
+    // Socket for cloud communication
+    let cloud_sock = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
-        if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
-            let active = pkt.active_channels();
-            let ts = chrono_lite_now();
+    println!("Phase 1: Establishing baseline (waiting for device packets)...");
+    println!();
 
-            for &(ch, temp) in &active {
-                let (threshold, alarmed) = match ch {
-                    1 => (ch1_threshold, &mut ch1_alarmed),
-                    2 => (ch2_threshold, &mut ch2_alarmed),
-                    _ => continue,
-                };
+    // Collect baseline: forward a few packets and note the standard echo pattern
+    let mut device_addr: Option<std::net::SocketAddr> = None;
+    let mut baseline_count = 0u32;
+    let mut buf = [0u8; 4096];
+    let mut cloud_buf = [0u8; 4096];
 
-                if let Some(limit) = threshold {
-                    if temp >= limit && !*alarmed {
-                        *alarmed = true;
-                        println!(
-                            "\x07[{ts}] *** ALARM *** CH{ch}: {temp:.1}°C ≥ {limit:.1}°C (from {addr})"
-                        );
-                    } else if temp < limit && *alarmed {
-                        *alarmed = false;
-                        println!(
-                            "[{ts}] [cleared] CH{ch}: {temp:.1}°C < {limit:.1}°C"
-                        );
-                    } else if !active.is_empty() {
-                        let status = if *alarmed { "ALARM" } else { "ok" };
-                        print!(
-                            "\r[{ts}] CH{ch}: {temp:.1}°C [{status}]  "
-                        );
-                        io::stdout().flush().ok();
-                    }
+    // Wait for at least 3 device packets to establish connectivity
+    while baseline_count < 3 {
+        tokio::select! {
+            result = listen_sock.recv_from(&mut buf) => {
+                let (len, src) = result?;
+                let data = &buf[..len];
+                device_addr = Some(src);
+                baseline_count += 1;
+
+                let hex = udp::hex_encode(data);
+                println!("  [baseline #{baseline_count}] device→cloud from {src}: {hex}");
+
+                // Forward to cloud
+                cloud_sock.send_to(data, cloud_addr).await?;
+            }
+            result = cloud_sock.recv_from(&mut cloud_buf) => {
+                let (len, src) = result?;
+                let data = &cloud_buf[..len];
+                let hex = udp::hex_encode(data);
+                let is_echo = is_standard_echo(data);
+                println!("  [baseline] cloud→device from {src}: {hex} {}", if is_echo { "(standard echo)" } else { "*** NON-STANDARD ***" });
+
+                // Forward back to device
+                if let Some(dev) = device_addr {
+                    listen_sock.send_to(data, dev).await?;
                 }
             }
         }
     }
+
+    println!();
+    println!("Phase 2: Triggering cloud set-alarm ({alarm_temp:.1}°C)...");
+
+    // Trigger the cloud alarm via REST API
+    let mut client = cloud::CloudClient::new()?;
+    client.set_device_mac(mac.to_string());
+
+    match client.set_alarm_temp(alarm_temp).await {
+        Ok(()) => println!("  ✓ Cloud set_alarm_temp({alarm_temp:.1}°C) succeeded"),
+        Err(e) => println!("  ✗ Cloud set_alarm_temp failed: {e}"),
+    }
+
+    println!();
+    println!("Phase 3: Capturing cloud responses for {duration_secs}s...");
+    println!("         (highlighting anything that's NOT a standard temp echo)");
+    println!();
+
+    // Now capture all traffic for the specified duration
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);
+    let mut capture_count = 0u32;
+    let mut non_echo_packets: Vec<(String, Vec<u8>)> = Vec::new();
+
+    loop {
+        let timeout = tokio::time::sleep_until(deadline);
+
+        tokio::select! {
+            _ = timeout => {
+                println!();
+                println!("Capture complete.");
+                break;
+            }
+            result = listen_sock.recv_from(&mut buf) => {
+                let (len, src) = result?;
+                let data = &buf[..len];
+                device_addr = Some(src);
+                capture_count += 1;
+
+                // Forward to cloud
+                cloud_sock.send_to(data, cloud_addr).await?;
+
+                // Brief device packet log
+                if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+                    let active = pkt.active_channels();
+                    let temps: Vec<String> = active.iter().map(|(ch, t)| format!("CH{ch}={t:.1}°C")).collect();
+                    print!("\r  [dev #{capture_count}] {}", temps.join(" "));
+                    io::stdout().flush().ok();
+                }
+            }
+            result = cloud_sock.recv_from(&mut cloud_buf) => {
+                let (len, src) = result?;
+                let data = &cloud_buf[..len];
+
+                let is_echo = is_standard_echo(data);
+                let hex = udp::hex_encode(data);
+
+                if !is_echo {
+                    println!();
+                    println!("  ╔══════════════════════════════════════════════════════╗");
+                    println!("  ║  *** NON-STANDARD CLOUD PACKET DETECTED ***         ║");
+                    println!("  ╚══════════════════════════════════════════════════════╝");
+                    println!("  Direction: cloud→device from {src}");
+                    println!("  Length:    {} bytes", data.len());
+                    println!("  Hex:       {hex}");
+                    println!("  ASCII:     {}", lossy_ascii(data));
+                    println!();
+
+                    // Annotate known bytes
+                    annotate_packet(data);
+                    println!();
+
+                    non_echo_packets.push((hex.clone(), data.to_vec()));
+                }
+
+                // Forward back to device
+                if let Some(dev) = device_addr {
+                    listen_sock.send_to(data, dev).await?;
+                }
+            }
+        }
+    }
+
+    // Summary
+    println!();
+    println!("=== CAPTURE SUMMARY ===");
+    println!("  Device packets forwarded: {capture_count}");
+    println!("  Non-echo cloud packets:   {}", non_echo_packets.len());
+
+    if non_echo_packets.is_empty() {
+        println!();
+        println!("No non-standard packets detected. Possible reasons:");
+        println!("  1. The cloud pushes alarm on next temp echo (modified echo)");
+        println!("  2. The alarm push is delayed — try longer --duration");
+        println!("  3. The alarm is embedded in the echo differently");
+        println!();
+        println!("Try also setting a DIFFERENT alarm value and comparing echoes.");
+        println!("Or try: grillsense cloud set-alarm --mac {mac} --token <TOKEN> -T 0");
+        println!("...to clear the alarm, then capture again.");
+    } else {
+        println!();
+        println!("Captured non-echo packets:");
+        for (i, (hex, raw)) in non_echo_packets.iter().enumerate() {
+            println!("  Packet {}: {hex}", i + 1);
+            annotate_packet(raw);
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if a packet is a standard temperature echo (direction byte flipped, rest same).
+fn is_standard_echo(data: &[u8]) -> bool {
+    if data.len() != protocol::udp::TEMP_PACKET_LEN {
+        return false;
+    }
+    // Must start with '<', type 'T', end with '>'
+    if data[0] != protocol::udp::START_BYTE
+        || data[1] != protocol::udp::TYPE_TEMP
+        || data[17] != protocol::udp::END_BYTE
+    {
+        return false;
+    }
+    // Direction must be cloud→device
+    if data[9] != protocol::udp::DIR_CLOUD_TO_DEVICE {
+        return false;
+    }
+    // Checksum must be valid
+    let expected = protocol::udp::compute_checksum(&data[1..16]);
+    data[16] == expected
+}
+
+/// Print byte-level annotation for a packet.
+fn annotate_packet(data: &[u8]) {
+    for (i, &b) in data.iter().enumerate() {
+        let note = match (i, b) {
+            (0, 0x3C) => "Start '<'",
+            (0, _) => "Start (unexpected!)",
+            (1, 0x54) => "Type 'T' (Temperature)",
+            (1, _) => "Type (UNKNOWN — new packet type!)",
+            (2..=6, _) => "Device ID byte",
+            (7, _) => "Unit config byte 1",
+            (8, _) => "Unit config byte 2",
+            (9, 0x00) => "Direction: device→cloud",
+            (9, 0x01) => "Direction: cloud→device (echo)",
+            (9, _) => "Direction: UNKNOWN VALUE",
+            (10, _) => "Temp byte count / flag",
+            (11, _) => "Temp CH1 high byte",
+            (12, _) => "Temp CH1 low byte",
+            (13, _) => "Temp CH2 high byte",
+            (14, _) => "Temp CH2 low byte",
+            (15, _) => "Padding / extra data",
+            (16, _) => "Checksum",
+            (17, 0x3E) => "End '>'",
+            _ => "Extra byte (beyond standard 18)",
+        };
+        println!("    [{i:2}] 0x{b:02X} ({b:3}) {note}");
+    }
+}
+
+fn lossy_ascii(data: &[u8]) -> String {
+    data.iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+/// Build an echo response for the device (mimics what the cloud does).
+fn build_echo(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() != protocol::udp::TEMP_PACKET_LEN {
+        return None;
+    }
+    if data[0] != protocol::udp::START_BYTE || data[17] != protocol::udp::END_BYTE {
+        return None;
+    }
+    if data[9] != protocol::udp::DIR_DEVICE_TO_CLOUD {
+        return None;
+    }
+    let mut echo = data.to_vec();
+    echo[9] = protocol::udp::DIR_CLOUD_TO_DEVICE;
+    echo[16] = protocol::udp::compute_checksum(&echo[1..16]);
+    Some(echo)
 }
 
 /// MQTT publisher that consumes device packets and publishes to HA.
