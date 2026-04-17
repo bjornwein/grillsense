@@ -131,13 +131,6 @@ sensors, connectivity status, and more).
 | `local monitor` | Receive and display temperatures directly |
 | `local set-alarm` | Set the device buzzer alarm via UDP |
 
-### Other commands
-
-| Command | Description |
-|---------|-------------|
-| `ble-provision` | Show the BLE provisioning AT command sequence |
-| `protocol` | Print a summary of the binary protocol |
-
 ## Reconfigure the device
 
 The thermometer ships pointed at `smartserver.emaxtime.cn:17000`. To use

@@ -30,25 +30,6 @@ enum Commands {
         #[command(subcommand)]
         command: LocalCommands,
     },
-
-    /// Show BLE provisioning sequence (dry-run)
-    BleProvision {
-        /// WiFi SSID to configure
-        #[arg(short = 's', long)]
-        ssid: String,
-        /// WiFi password
-        #[arg(short = 'p', long)]
-        wifi_password: String,
-        /// Local server IP (omit to use cloud server)
-        #[arg(short, long)]
-        local_ip: Option<String>,
-        /// Local server port
-        #[arg(short = 'P', long, default_value = "17000")]
-        local_port: u16,
-    },
-
-    /// Show protocol information
-    Protocol,
 }
 
 // ---------- Cloud subcommands ----------
@@ -308,19 +289,6 @@ async fn main() -> Result<()> {
             }
             LocalCommands::SetAlarm { port, ch1, ch2 } => cmd_local_set_alarm(port, ch1, ch2).await,
         },
-        Commands::BleProvision {
-            ssid,
-            wifi_password,
-            local_ip,
-            local_port,
-        } => {
-            cmd_ble_provision(&ssid, &wifi_password, local_ip.as_deref(), local_port);
-            Ok(())
-        }
-        Commands::Protocol => {
-            cmd_protocol();
-            Ok(())
-        }
     }
 }
 
@@ -527,57 +495,6 @@ async fn cmd_configure(
         println!("Configuration saved. Reboot the device to apply (AT+Z or power cycle).");
     }
     Ok(())
-}
-
-fn cmd_protocol() {
-    println!("GrillSense Protocol Summary");
-    println!("===========================");
-    println!();
-    println!("Cloud API: {}", protocol::CLOUD_BASE_URL);
-    println!(
-        "Cloud UDP: {}:{}",
-        protocol::CLOUD_HOST,
-        protocol::udp::CLOUD_PORT
-    );
-    println!();
-    println!("BLE Service:  {}", protocol::ble::SERVICE_UUID);
-    println!("BLE Notify:   {}", protocol::ble::NOTIFY_UUID);
-    println!("BLE Write:    {}", protocol::ble::WRITE_UUID);
-    println!("BLE Name:     {}*", protocol::ble::DEVICE_NAME_PREFIX);
-    println!();
-    println!("AP Mode SSID: {}", protocol::ap::DEFAULT_SSID);
-    println!("AP Mode IP:   {}", protocol::ap::DEFAULT_IP);
-    println!("AP Mode Port: {}", protocol::ap::DEFAULT_PORT);
-    println!();
-    println!("See PROTOCOL.md for full documentation.");
-}
-
-fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, local_port: u16) {
-    let config = if let Some(ip) = local_ip {
-        ble::ProvisionConfig::local(
-            ssid.to_string(),
-            wifi_password.to_string(),
-            ip.to_string(),
-            local_port,
-        )
-    } else {
-        ble::ProvisionConfig::cloud_default(ssid.to_string(), wifi_password.to_string())
-    };
-
-    ble::print_provision_sequence(&config);
-    println!();
-    if local_ip.is_some() {
-        println!(
-            "NOTE: Device will be configured to send data to {}:{}",
-            config.server_host, config.server_port
-        );
-        println!("Run 'grillsense local proxy' on that host to receive data.");
-    } else {
-        println!("NOTE: Device will be configured to send data to the cloud server.");
-    }
-    println!();
-    println!("BLE provisioning requires a Bluetooth adapter and the btleplug runtime.");
-    println!("This is a dry-run showing the command sequence.");
 }
 
 #[allow(clippy::too_many_arguments)]
