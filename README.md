@@ -225,6 +225,12 @@ MQTT discovery.
 - [md-5](https://docs.rs/md-5/) — MD5 hashing (cloud auth)
 - [anyhow](https://docs.rs/anyhow/) — error handling
 
+## Roadmap
+
+- [ ] BLE provisioning command (configure WiFi + server from CLI)
+- [ ] Home Assistant config flow for all three operating modes (local, cloud, proxy)
+- [ ] Auto-provisioning: discover and configure new devices from Home Assistant
+
 ## License
 
 This project is for personal and educational use. The protocol
