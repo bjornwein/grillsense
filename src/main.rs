@@ -67,29 +67,9 @@ enum CloudCommands {
         /// Show temperature in Fahrenheit
         #[arg(short = 'F', long)]
         fahrenheit: bool,
-    },
-
-    /// Set alarm temperature on the cloud server
-    SetAlarm {
-        /// Auth token (from login)
-        #[arg(short, long)]
-        token: String,
-        /// Device MAC address
-        #[arg(short, long)]
-        mac: String,
-        /// Alarm temperature in Celsius
-        #[arg(short = 'T', long)]
-        temp: f64,
-    },
-
-    /// Bridge cloud temperature data to Home Assistant via MQTT
-    Bridge {
-        /// Auth token (from login)
-        #[arg(short, long)]
-        token: String,
-        /// Device MAC address
-        #[arg(short, long)]
-        mac: String,
+        /// Also publish to MQTT for Home Assistant
+        #[arg(long)]
+        mqtt: bool,
         /// MQTT broker host
         #[arg(long, default_value = "localhost")]
         mqtt_host: String,
@@ -105,9 +85,19 @@ enum CloudCommands {
         /// Device name in Home Assistant
         #[arg(long, default_value = "BBQ Thermometer")]
         device_name: String,
-        /// Polling interval in seconds
-        #[arg(short, long, default_value = "3")]
-        interval: u64,
+    },
+
+    /// Set alarm temperature on the cloud server
+    SetAlarm {
+        /// Auth token (from login)
+        #[arg(short, long)]
+        token: String,
+        /// Device MAC address
+        #[arg(short, long)]
+        mac: String,
+        /// Alarm temperature in Celsius
+        #[arg(short = 'T', long)]
+        temp: f64,
     },
 }
 
@@ -243,31 +233,29 @@ async fn main() -> Result<()> {
                 mac,
                 interval,
                 fahrenheit,
-            } => cmd_cloud_monitor(&token, &mac, interval, fahrenheit).await,
-            CloudCommands::SetAlarm { token, mac, temp } => {
-                cmd_cloud_set_alarm(&token, &mac, temp).await
-            }
-            CloudCommands::Bridge {
-                token,
-                mac,
+                mqtt,
                 mqtt_host,
                 mqtt_port,
                 mqtt_user,
                 mqtt_pass,
                 device_name,
-                interval,
             } => {
-                cmd_cloud_bridge(
+                cmd_cloud_monitor(
                     &token,
                     &mac,
+                    interval,
+                    fahrenheit,
+                    mqtt,
                     &mqtt_host,
                     mqtt_port,
                     mqtt_user,
                     mqtt_pass,
                     &device_name,
-                    interval,
                 )
                 .await
+            }
+            CloudCommands::SetAlarm { token, mac, temp } => {
+                cmd_cloud_set_alarm(&token, &mac, temp).await
             }
         },
         Commands::Local { command } => match command {
@@ -390,7 +378,19 @@ async fn cmd_devices(token: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_cloud_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn cmd_cloud_monitor(
+    token: &str,
+    mac: &str,
+    interval: u64,
+    fahrenheit: bool,
+    mqtt_enabled: bool,
+    mqtt_host: &str,
+    mqtt_port: u16,
+    mqtt_user: Option<String>,
+    mqtt_pass: Option<String>,
+    device_name: &str,
+) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
     client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
@@ -401,54 +401,117 @@ async fn cmd_cloud_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bo
         "Monitoring device {} (cloud ID: {}, {}), Ctrl+C to stop...",
         mac, dev_id, unit_label
     );
+    if mqtt_enabled {
+        println!("  MQTT: {}:{}", mqtt_host, mqtt_port);
+    }
     println!();
 
-    let interval_dur = Duration::from_secs(interval);
-    let mut consecutive_errors = 0u32;
+    // Start MQTT bridge if enabled
+    let mqtt_config = if mqtt_enabled {
+        let config = mqtt::MqttHaConfig {
+            broker_host: mqtt_host.to_string(),
+            broker_port: mqtt_port,
+            username: mqtt_user,
+            password: mqtt_pass,
+            device_name: device_name.to_string(),
+            device_id: mac.to_string(),
+            poll_interval: Duration::from_secs(interval),
+        };
+        Some(config)
+    } else {
+        None
+    };
 
-    loop {
-        match client.get_temperature().await {
-            Ok(temp) => {
-                consecutive_errors = 0;
-                let online = if temp.online() { "online" } else { "OFFLINE" };
-                let now = chrono_lite_now();
-
-                let active = temp.active_channels();
-                let channels: String = if active.is_empty() {
-                    "no probes connected".to_string()
-                } else {
-                    active
-                        .iter()
-                        .map(|(ch, t)| {
-                            let v = if fahrenheit {
-                                protocol::celsius_to_fahrenheit(*t)
-                            } else {
-                                *t
-                            };
-                            format!("CH{ch}: {v:.1}{unit_label}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                };
-
-                print!("\r[{now}] {online} | {channels}    ");
-                io::stdout().flush().context("flush stdout")?;
+    // If MQTT is enabled, delegate to the existing MQTT bridge
+    if let Some(config) = mqtt_config {
+        // Spawn a display task that also polls + prints to console
+        let display_client = {
+            let mut c = cloud::CloudClient::new()?;
+            c.set_token(token.to_string());
+            c.set_device_mac(mac.to_string());
+            c
+        };
+        let interval_dur = Duration::from_secs(interval);
+        tokio::spawn(async move {
+            loop {
+                if let Ok(temp) = display_client.get_temperature().await {
+                    let online = if temp.online() { "online" } else { "OFFLINE" };
+                    let now = chrono_lite_now();
+                    let active = temp.active_channels();
+                    let channels: String = if active.is_empty() {
+                        "no probes connected".to_string()
+                    } else {
+                        active
+                            .iter()
+                            .map(|(ch, t)| {
+                                let v = if fahrenheit {
+                                    protocol::celsius_to_fahrenheit(*t)
+                                } else {
+                                    *t
+                                };
+                                let unit = if fahrenheit { "°F" } else { "°C" };
+                                format!("CH{ch}: {v:.1}{unit}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    };
+                    print!("\r[{now}] {online} | {channels}    ");
+                    io::stdout().flush().ok();
+                }
+                tokio::time::sleep(interval_dur).await;
             }
-            Err(e) => {
-                consecutive_errors += 1;
-                eprint!(
-                    "\r[error] {} (attempt {})                ",
-                    e, consecutive_errors
-                );
-                io::stderr().flush().ok();
-                if consecutive_errors >= 10 {
-                    println!();
-                    return Err(e.context("Too many consecutive errors"));
+        });
+
+        mqtt::run_bridge(&config, &client).await
+    } else {
+        // Console-only monitoring
+        let interval_dur = Duration::from_secs(interval);
+        let mut consecutive_errors = 0u32;
+
+        loop {
+            match client.get_temperature().await {
+                Ok(temp) => {
+                    consecutive_errors = 0;
+                    let online = if temp.online() { "online" } else { "OFFLINE" };
+                    let now = chrono_lite_now();
+
+                    let active = temp.active_channels();
+                    let channels: String = if active.is_empty() {
+                        "no probes connected".to_string()
+                    } else {
+                        active
+                            .iter()
+                            .map(|(ch, t)| {
+                                let v = if fahrenheit {
+                                    protocol::celsius_to_fahrenheit(*t)
+                                } else {
+                                    *t
+                                };
+                                format!("CH{ch}: {v:.1}{unit_label}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    };
+
+                    print!("\r[{now}] {online} | {channels}    ");
+                    io::stdout().flush().context("flush stdout")?;
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    eprint!(
+                        "\r[error] {} (attempt {})                ",
+                        e, consecutive_errors
+                    );
+                    io::stderr().flush().ok();
+                    if consecutive_errors >= 10 {
+                        println!();
+                        return Err(e.context("Too many consecutive errors"));
+                    }
                 }
             }
-        }
 
-        tokio::time::sleep(interval_dur).await;
+            tokio::time::sleep(interval_dur).await;
+        }
     }
 }
 
@@ -537,40 +600,6 @@ async fn cmd_configure(
         println!("Configuration saved. Reboot the device to apply (AT+Z or power cycle).");
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn cmd_cloud_bridge(
-    token: &str,
-    mac: &str,
-    mqtt_host: &str,
-    mqtt_port: u16,
-    mqtt_user: Option<String>,
-    mqtt_pass: Option<String>,
-    device_name: &str,
-    interval: u64,
-) -> Result<()> {
-    let mut client = cloud::CloudClient::new()?;
-    client.set_token(token.to_string());
-    client.set_device_mac(mac.to_string());
-
-    let config = mqtt::MqttHaConfig {
-        broker_host: mqtt_host.to_string(),
-        broker_port: mqtt_port,
-        username: mqtt_user,
-        password: mqtt_pass,
-        device_name: device_name.to_string(),
-        device_id: mac.to_string(),
-        poll_interval: Duration::from_secs(interval),
-    };
-
-    println!("Starting Home Assistant MQTT bridge");
-    println!("  Device:   {} ({})", device_name, mac);
-    println!("  Broker:   {}:{}", mqtt_host, mqtt_port);
-    println!("  Interval: {}s", interval);
-    println!();
-
-    mqtt::run_bridge(&config, &client).await
 }
 
 #[allow(clippy::too_many_arguments)]

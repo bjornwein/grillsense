@@ -122,9 +122,8 @@ sensors, connectivity status, and more).
 |---------|-------------|
 | `cloud login` | Authenticate with the vendor cloud |
 | `cloud devices` | List devices bound to your account |
-| `cloud monitor` | Poll temperature from the cloud API |
+| `cloud monitor` | Poll temperature from the cloud API (+ optional MQTT) |
 | `cloud set-alarm` | Set the alarm threshold via the cloud |
-| `cloud bridge` | Poll cloud + publish to MQTT |
 
 ### Local commands
 
