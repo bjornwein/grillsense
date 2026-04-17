@@ -82,6 +82,134 @@ pub mod udp {
     pub const CLOUD_PORT: u16 = 17000;
     pub const ALT_CLOUD_IP: &str = "47.52.149.125";
     pub const ALT_CLOUD_PORT: u16 = 10000;
+
+    // Binary packet framing
+    pub const START_BYTE: u8 = 0x3C; // '<'
+    pub const END_BYTE: u8 = 0x3E;   // '>'
+    pub const TYPE_TEMP: u8 = 0x54;   // 'T' — temperature packet
+
+    /// Fixed packet length for temperature reports.
+    pub const TEMP_PACKET_LEN: usize = 18;
+
+    /// Direction byte values.
+    pub const DIR_DEVICE_TO_CLOUD: u8 = 0x00;
+    pub const DIR_CLOUD_TO_DEVICE: u8 = 0x01;
+
+    /// Parsed binary temperature packet.
+    ///
+    /// 18-byte format:
+    /// ```text
+    /// Offset  Len  Field
+    /// 0       1    Start delimiter '<' (0x3C)
+    /// 1       1    Packet type 'T' (0x54)
+    /// 2       5    Device ID bytes (e.g. 02 CC 44 55 66)
+    /// 7       2    Unit/config bytes (ASCII "00" = Celsius)
+    /// 9       1    Direction: 0x00=device→cloud, 0x01=cloud→device
+    /// 10      1    Channel count / flag (0x04 = 4 temp bytes = 2 channels)
+    /// 11      2    Temperature ch1 (u16 big-endian, value/10 = °C)
+    /// 13      2    Temperature ch2 (u16 big-endian, value/10 = °C)
+    /// 15      2    Padding byte (0x00) + Checksum
+    /// 17      1    End delimiter '>' (0x3E)
+    /// ```
+    ///
+    /// Checksum = (sum(bytes[1..16]) + 0x3C) & 0xFF
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TempPacket {
+        pub device_id: String,
+        pub direction: u8,
+        pub temp_ch1: f64,
+        pub temp_ch2: f64,
+        pub raw: Vec<u8>,
+    }
+
+    impl TempPacket {
+        /// Parse a raw 18-byte temperature packet.
+        pub fn parse(data: &[u8]) -> Option<Self> {
+            if data.len() != TEMP_PACKET_LEN {
+                return None;
+            }
+            if data[0] != START_BYTE || data[17] != END_BYTE || data[1] != TYPE_TEMP {
+                return None;
+            }
+
+            // Verify checksum
+            let expected_checksum = compute_checksum(&data[1..16]);
+            if data[16] != expected_checksum {
+                return None;
+            }
+
+            let device_id = data[2..7]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<String>();
+
+            let temp_ch1 = u16::from_be_bytes([data[11], data[12]]) as f64 / 10.0;
+            let temp_ch2 = u16::from_be_bytes([data[13], data[14]]) as f64 / 10.0;
+
+            Some(TempPacket {
+                device_id,
+                direction: data[9],
+                temp_ch1,
+                temp_ch2,
+                raw: data.to_vec(),
+            })
+        }
+
+        /// Build a temperature packet (for constructing echo responses, etc.).
+        pub fn build(
+            device_id_bytes: &[u8; 5],
+            direction: u8,
+            temp_ch1: u16,
+            temp_ch2: u16,
+        ) -> Vec<u8> {
+            let mut pkt = vec![START_BYTE, TYPE_TEMP];
+            pkt.extend_from_slice(device_id_bytes);
+            pkt.extend_from_slice(&[0x30, 0x30]); // "00" unit config
+            pkt.push(direction);
+            pkt.push(0x04); // 4 temp bytes
+            pkt.extend_from_slice(&temp_ch1.to_be_bytes());
+            pkt.extend_from_slice(&temp_ch2.to_be_bytes());
+            pkt.push(0x00); // padding
+            let checksum = compute_checksum(&pkt[1..]);
+            pkt.push(checksum);
+            pkt.push(END_BYTE);
+            pkt
+        }
+
+        /// Active (non-zero) channels with 1-based index.
+        pub fn active_channels(&self) -> Vec<(usize, f64)> {
+            let mut ch = Vec::new();
+            if self.temp_ch1 != 0.0 {
+                ch.push((1, self.temp_ch1));
+            }
+            if self.temp_ch2 != 0.0 {
+                ch.push((2, self.temp_ch2));
+            }
+            ch
+        }
+
+        /// Convert to a cloud-API-compatible TempResult.
+        pub fn to_temp_result(&self) -> super::TempResult {
+            super::TempResult {
+                is_online: false,
+                isonline: true,
+                time: String::new(),
+                temperature_ch1: self.temp_ch1,
+                temperature_ch2: self.temp_ch2,
+                temperature_ch3: 0.0,
+                temperature_ch4: 0.0,
+                temperature_ch5: 0.0,
+                temperature_ch6: 0.0,
+            }
+        }
+    }
+
+    /// Compute the checksum for bytes between '<' and the checksum position.
+    /// checksum = (sum(content_bytes) + 0x3C) & 0xFF
+    pub fn compute_checksum(content: &[u8]) -> u8 {
+        let sum: u32 = content.iter().map(|&b| b as u32).sum();
+        ((sum + START_BYTE as u32) & 0xFF) as u8
+    }
 }
 
 use serde::Deserialize;
@@ -337,5 +465,68 @@ mod tests {
         let active = temp.active_channels();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0], (1, 21.6));
+    }
+
+    #[test]
+    fn test_udp_packet_parse() {
+        // Real captured packet from device
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
+            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
+            0x99, 0x3E,
+        ];
+        let pkt = udp::TempPacket::parse(&data).expect("should parse");
+        assert_eq!(pkt.device_id, "02CC445566");
+        assert_eq!(pkt.direction, udp::DIR_DEVICE_TO_CLOUD);
+        assert!((pkt.temp_ch1 - 21.6).abs() < 0.01);
+        assert_eq!(pkt.temp_ch2, 0.0);
+    }
+
+    #[test]
+    fn test_udp_packet_parse_cloud_echo() {
+        // Cloud echo has direction=1 and adjusted checksum
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
+            0x30, 0x01, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
+            0x9A, 0x3E,
+        ];
+        let pkt = udp::TempPacket::parse(&data).expect("should parse cloud echo");
+        assert_eq!(pkt.direction, udp::DIR_CLOUD_TO_DEVICE);
+        assert!((pkt.temp_ch1 - 21.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_udp_packet_build_roundtrip() {
+        let dev_id: [u8; 5] = [0x02, 0xCC, 0x44, 0x55, 0x66];
+        let built = udp::TempPacket::build(&dev_id, udp::DIR_DEVICE_TO_CLOUD, 216, 0);
+        assert_eq!(built.len(), 18);
+        let parsed = udp::TempPacket::parse(&built).expect("roundtrip should parse");
+        assert_eq!(parsed.device_id, "02CC445566");
+        assert!((parsed.temp_ch1 - 21.6).abs() < 0.01);
+        assert_eq!(parsed.temp_ch2, 0.0);
+    }
+
+    #[test]
+    fn test_udp_checksum() {
+        // Verify checksum computation matches captured data
+        let content: Vec<u8> = vec![
+            0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
+            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(udp::compute_checksum(&content), 0x99);
+    }
+
+    #[test]
+    fn test_udp_to_temp_result() {
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30,
+            0x30, 0x00, 0x04, 0x00, 0xD8, 0x00, 0x00, 0x00,
+            0x99, 0x3E,
+        ];
+        let pkt = udp::TempPacket::parse(&data).unwrap();
+        let result = pkt.to_temp_result();
+        assert!(result.online());
+        assert!((result.temperature_ch1 - 21.6).abs() < 0.01);
+        assert_eq!(result.temperature_ch2, 0.0);
     }
 }

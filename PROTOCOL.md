@@ -364,14 +364,96 @@ Content-Type: application/json
 
 Unit values: `"C"` (Celsius) or `"F"` (Fahrenheit).
 
-## Device-to-Cloud UDP Protocol
+## Device-to-Cloud UDP Binary Protocol
 
 The device sends temperature data via **UDP** to the cloud server on port **17000**.
+The protocol uses a simple fixed-length binary packet format.
 
-- Destination: `smartserver.emaxtime.cn:17000`
-- Alternative endpoint found in AP mode: `47.52.149.125:10000`
-- Packet format: **Unknown** — needs traffic capture to determine exact format
-- Polling interval in app: every 3 seconds
+- Destination: `smartserver.emaxtime.cn:17000` (resolved: `47.52.241.127`)
+- Alternative endpoint found in APK: `47.52.149.125:10000` (G001 devices)
+- Packet interval: ~1 second (continuous while powered on)
+- Packet direction: device sends, cloud echoes back with direction flag flipped
+
+### Temperature Packet Format (18 bytes)
+
+```
+Offset  Len  Field                 Example Value
+0       1    Start delimiter       0x3C ('<')
+1       1    Packet type           0x54 ('T' = Temperature)
+2       5    Device ID             02 CC 44 55 66 (raw bytes of cloud device ID)
+7       2    Unit config           0x30 0x30 (ASCII "00" = Celsius)
+9       1    Direction             0x00 = device→cloud, 0x01 = cloud→device (echo)
+10      1    Temp byte count       0x04 (4 bytes = 2 channels × 2 bytes)
+11      2    Temperature CH1       0x00D8 = 216 → 21.6°C (uint16 big-endian, ÷10)
+13      2    Temperature CH2       0x0000 = 0.0°C (no probe connected)
+15      1    Padding               0x00
+16      1    Checksum              0x5A
+17      1    End delimiter         0x3E ('>')
+```
+
+### Example: Captured Real Packet
+
+Device→Cloud:
+```
+3C 54 02 CC 44 55 66 30 30 00 04 00 D8 00 00 00 99 3E
+```
+Decoded: Device `02CC445566`, CH1 = 21.6°C, CH2 = 0.0°C
+
+Cloud→Device echo:
+```
+3C 54 02 CC 44 55 66 30 30 01 04 00 D8 00 00 00 9A 3E
+```
+Identical except: byte 9 = `0x01` (echo), byte 16 = `0x5B` (adjusted checksum)
+
+### Temperature Encoding
+
+Temperatures are unsigned 16-bit big-endian integers divided by 10:
+- `0x00D8` = 216 → **21.6°C**
+- `0x0000` = 0 → **no probe connected**
+- Range: 0.0–6553.5°C (theoretical), practical: 0–500°C
+
+### Checksum Algorithm
+
+```
+checksum = (sum(bytes[1..16]) + 0x3C) & 0xFF
+```
+
+That is: sum all bytes between the start delimiter `<` (exclusive) and the checksum
+position, then add the start delimiter byte value (`0x3C`), truncate to 8 bits.
+
+Verification for device packet:
+```
+sum(0x54 + 0x02 + 0xCC + 0x44 + 0x55 + 0x66 + 0x30 + 0x30 +
+    0x00 + 0x04 + 0x00 + 0xD8 + 0x00 + 0x00 + 0x00)  = 0x35D
+(0x35D + 0x3C) & 0xFF = 0x399 & 0xFF = 0x99 ✓
+```
+
+### Cloud Echo Behavior
+
+The cloud server immediately echoes back the same packet with:
+- Byte 9 changed from `0x00` to `0x01` (marks as cloud→device direction)
+- Checksum recalculated to account for the changed byte
+
+This echo may serve as an acknowledgment that the cloud received the data.
+
+### UDP Proxy Architecture
+
+A local proxy can sit between the device and cloud to extract data locally
+while keeping the cloud functional:
+
+```
+Device ──UDP──► [Local Proxy :17000] ──UDP──► Cloud :17000
+                     │          ▲
+                     │          │ cloud echo forwarded back
+                     ├──► parse temperature
+                     └──► publish to MQTT → Home Assistant
+```
+
+To set this up:
+1. Run the proxy: `grillsense proxy --port 17000`
+2. Redirect the device: `grillsense configure --ip <device-ip> --ssid <ssid> -P <pass> --server <proxy-ip>`
+3. The proxy forwards all traffic to the cloud (official app keeps working)
+4. Optionally add `--mqtt` to publish temperatures to Home Assistant via MQTT
 
 ## Temperature Conversion
 

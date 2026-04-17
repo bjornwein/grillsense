@@ -155,6 +155,37 @@ enum Commands {
         interval: u64,
     },
 
+    /// Run UDP proxy: receive device data, forward to cloud + MQTT
+    Proxy {
+        /// UDP port to listen on
+        #[arg(short, long, default_value = "17000")]
+        port: u16,
+        /// Forward packets to the cloud server (keeps official app working)
+        #[arg(long, default_value = "true")]
+        forward: bool,
+        /// Also publish to MQTT for Home Assistant
+        #[arg(long)]
+        mqtt: bool,
+        /// Device MAC address (for MQTT entity naming)
+        #[arg(short, long)]
+        mac: Option<String>,
+        /// MQTT broker host
+        #[arg(long, default_value = "localhost")]
+        mqtt_host: String,
+        /// MQTT broker port
+        #[arg(long, default_value = "1883")]
+        mqtt_port: u16,
+        /// MQTT username
+        #[arg(long)]
+        mqtt_user: Option<String>,
+        /// MQTT password
+        #[arg(long)]
+        mqtt_pass: Option<String>,
+        /// Device name in Home Assistant
+        #[arg(long, default_value = "BBQ Thermometer")]
+        device_name: String,
+    },
+
     /// Show protocol information
     Protocol,
 }
@@ -218,6 +249,30 @@ async fn main() -> Result<()> {
         Commands::Protocol => {
             cmd_protocol();
             Ok(())
+        }
+        Commands::Proxy {
+            port,
+            forward,
+            mqtt,
+            mac,
+            mqtt_host,
+            mqtt_port,
+            mqtt_user,
+            mqtt_pass,
+            device_name,
+        } => {
+            cmd_proxy(
+                port,
+                forward,
+                mqtt,
+                mac,
+                &mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                &device_name,
+            )
+            .await
         }
     }
 }
@@ -493,6 +548,170 @@ async fn cmd_ha_bridge(
     println!();
 
     mqtt::run_bridge(&config, &client).await
+}
+
+async fn cmd_proxy(
+    port: u16,
+    forward: bool,
+    mqtt_enabled: bool,
+    mac: Option<String>,
+    mqtt_host: &str,
+    mqtt_port: u16,
+    mqtt_user: Option<String>,
+    mqtt_pass: Option<String>,
+    device_name: &str,
+) -> Result<()> {
+    use tokio::sync::mpsc;
+
+    let cloud_addr = udp::resolve_cloud_addr().await?;
+
+    println!("GrillSense UDP Proxy");
+    println!("====================");
+    println!("  Listen:  0.0.0.0:{port}");
+    println!("  Cloud:   {cloud_addr} (forward: {forward})");
+    println!("  MQTT:    {mqtt_enabled}");
+    println!();
+    println!("Configure device to send here:");
+    println!("  grillsense configure --ip <device-ip> --ssid <ssid> -P <pass> --server <this-ip> --server-port {port}");
+    println!();
+
+    let (packet_tx, mut packet_rx) = mpsc::channel::<udp::DevicePacket>(64);
+
+    // Start MQTT publisher task if enabled
+    if mqtt_enabled {
+        let mac_id = mac.clone().unwrap_or_else(|| "unknown".to_string());
+        let mqtt_host = mqtt_host.to_string();
+        let mqtt_user = mqtt_user.clone();
+        let mqtt_pass = mqtt_pass.clone();
+        let device_name = device_name.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = mqtt_proxy_publisher(
+                &mut packet_rx,
+                &mac_id,
+                &mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                &device_name,
+            )
+            .await
+            {
+                eprintln!("MQTT publisher error: {e}");
+            }
+        });
+    } else {
+        // Drain the channel so the proxy doesn't block
+        tokio::spawn(async move {
+            while let Some(pkt) = packet_rx.recv().await {
+                // Log parsed data even without MQTT
+                if let Some(udp::ParsedData::Temperature(ref pkt)) = pkt.parsed {
+                    let active = pkt.active_channels();
+                    let temps: Vec<String> = active
+                        .iter()
+                        .map(|(ch, t)| format!("CH{ch}: {t:.1}°C"))
+                        .collect();
+                    if !temps.is_empty() {
+                        println!("  [parsed] {}", temps.join(" | "));
+                    }
+                }
+            }
+        });
+    }
+
+    udp::run_proxy(udp::ProxyConfig {
+        listen_port: port,
+        cloud_addr,
+        forward_to_cloud: forward,
+        packet_tx: Some(packet_tx),
+    })
+    .await
+}
+
+/// MQTT publisher that consumes device packets and publishes to HA.
+async fn mqtt_proxy_publisher(
+    rx: &mut tokio::sync::mpsc::Receiver<udp::DevicePacket>,
+    device_id: &str,
+    mqtt_host: &str,
+    mqtt_port: u16,
+    mqtt_user: Option<String>,
+    mqtt_pass: Option<String>,
+    device_name: &str,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let addr = format!("{mqtt_host}:{mqtt_port}");
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .with_context(|| format!("Failed to connect to MQTT broker at {addr}"))?;
+
+    // MQTT CONNECT
+    let connect = mqtt::build_mqtt_connect(
+        &format!("grillsense_proxy_{device_id}"),
+        mqtt_user.as_deref(),
+        mqtt_pass.as_deref(),
+        None,
+    );
+    stream.write_all(&connect).await?;
+
+    let mut connack = [0u8; 4];
+    stream.read_exact(&mut connack).await?;
+    if connack[0] != 0x20 || connack[3] != 0x00 {
+        anyhow::bail!("MQTT CONNACK failed (code: {})", connack[3]);
+    }
+
+    println!("[mqtt] Connected to {addr}");
+
+    // Publish HA discovery for 6 channels
+    let config = mqtt::MqttHaConfig {
+        broker_host: mqtt_host.to_string(),
+        broker_port: mqtt_port,
+        username: mqtt_user,
+        password: mqtt_pass,
+        device_name: device_name.to_string(),
+        device_id: device_id.to_string(),
+        poll_interval: Duration::from_secs(1), // unused in proxy mode
+    };
+
+    for (topic, payload) in config.discovery_messages() {
+        let packet = mqtt::build_mqtt_publish(&topic, payload.as_bytes(), true);
+        stream.write_all(&packet).await?;
+    }
+    println!("[mqtt] Published HA discovery for 7 entities");
+
+    // Mark online
+    let avail = mqtt::build_mqtt_publish(&config.availability_topic(), b"online", true);
+    stream.write_all(&avail).await?;
+
+    // Process incoming device packets
+    while let Some(pkt) = rx.recv().await {
+        if pkt.direction != udp::PacketDirection::DeviceToCloud {
+            continue;
+        }
+        if let Some(udp::ParsedData::Temperature(ref temp_pkt)) = pkt.parsed {
+            // Convert to TempResult for the existing MQTT state format
+            let temp_result = temp_pkt.to_temp_result();
+            let payload = config.state_payload(&temp_result);
+
+            let packet = mqtt::build_mqtt_publish(
+                &config.state_topic(),
+                payload.as_bytes(),
+                false,
+            );
+            stream.write_all(&packet).await?;
+
+            // Keepalive
+            stream.write_all(&[0xC0, 0x00]).await?;
+            let mut resp = [0u8; 64];
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                stream.read(&mut resp),
+            )
+            .await;
+        }
+    }
+
+    Ok(())
 }
 
 /// Simple timestamp without pulling in chrono.

@@ -1,118 +1,247 @@
-#![allow(dead_code)]
-/// UDP listener for intercepting device-to-cloud temperature packets.
+/// UDP proxy that intercepts device-to-cloud traffic.
 ///
-/// The device sends UDP datagrams to smartserver.emaxtime.cn:17000.
-/// By redirecting DNS or routing, these packets can be captured locally.
+/// Sits between the device and the cloud server, forwarding all packets
+/// in both directions while extracting temperature data locally.
+///
+/// Architecture:
+/// ```text
+/// Device ──UDP──► [Local Proxy :17000] ──UDP──► Cloud :17000
+///                      │          ▲
+///                      │          │ (cloud responses forwarded back)
+///                      ▼
+///                   parse + optional MQTT
+/// ```
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
-/// Parsed temperature packet from the device.
+use crate::protocol;
+
+/// Parsed data from a device packet.
 #[derive(Debug, Clone)]
-pub struct UdpTempPacket {
+pub struct DevicePacket {
     pub source: SocketAddr,
     pub raw: Vec<u8>,
-    pub raw_hex: String,
-    pub raw_ascii: String,
+    pub direction: PacketDirection,
+    pub parsed: Option<ParsedData>,
 }
 
-/// Listen for UDP packets on the specified port.
-///
-/// This binds to `0.0.0.0:<port>` and prints every received packet.
-/// To receive device data, redirect the device's cloud traffic here
-/// (e.g., via DNS override for smartserver.emaxtime.cn or iptables DNAT).
-pub async fn listen(port: u16) -> Result<()> {
-    let addr = format!("0.0.0.0:{port}");
-    let socket = UdpSocket::bind(&addr)
-        .await
-        .with_context(|| format!("Failed to bind UDP socket on {addr}"))?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketDirection {
+    DeviceToCloud,
+    CloudToDevice,
+}
 
-    println!("UDP listener bound on {addr}");
-    println!("Waiting for packets... (redirect device traffic here)");
-    println!();
-    println!("Tip: Add to /etc/hosts or DNS:");
-    println!("  <your-ip>  smartserver.emaxtime.cn");
-    println!();
+impl std::fmt::Display for PacketDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceToCloud => write!(f, "device→cloud"),
+            Self::CloudToDevice => write!(f, "cloud→device"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ParsedData {
+    Temperature(protocol::udp::TempPacket),
+    Csv(Vec<String>),
+    Unknown,
+}
+
+/// Configuration for the UDP proxy.
+pub struct ProxyConfig {
+    /// Local port to listen on.
+    pub listen_port: u16,
+    /// Cloud server address (ip:port) to forward to.
+    pub cloud_addr: SocketAddr,
+    /// Whether to forward packets to the cloud.
+    pub forward_to_cloud: bool,
+    /// Channel to send parsed packets for MQTT or other consumers.
+    pub packet_tx: Option<mpsc::Sender<DevicePacket>>,
+}
+
+/// Run the UDP proxy.
+///
+/// Binds on `0.0.0.0:<listen_port>`, forwards device packets to the cloud,
+/// forwards cloud responses back to the device, and sends parsed packets
+/// through the channel for MQTT publishing.
+pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
+    let listen_addr = format!("0.0.0.0:{}", config.listen_port);
+    let listen_socket = Arc::new(
+        UdpSocket::bind(&listen_addr)
+            .await
+            .with_context(|| format!("Failed to bind on {listen_addr}"))?,
+    );
+
+    println!("UDP proxy listening on {listen_addr}");
+    if config.forward_to_cloud {
+        println!("Forwarding to cloud: {}", config.cloud_addr);
+    } else {
+        println!("Cloud forwarding DISABLED (local-only mode)");
+    }
+
+    // Socket for talking to the cloud
+    let cloud_socket = Arc::new(
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("Failed to bind cloud-side UDP socket")?,
+    );
 
     let mut buf = [0u8; 4096];
+    let mut cloud_buf = [0u8; 4096];
     let mut packet_count: u64 = 0;
+    // Track the device's address so we can forward cloud responses back
+    let mut device_addr: Option<SocketAddr> = None;
+
+    println!("Waiting for device packets...");
+    println!();
 
     loop {
-        let (len, src) = socket
-            .recv_from(&mut buf)
-            .await
-            .context("Failed to receive UDP packet")?;
+        tokio::select! {
+            // Packets from the device (or any client)
+            result = listen_socket.recv_from(&mut buf) => {
+                let (len, src) = result.context("recv_from failed")?;
+                let data = &buf[..len];
+                packet_count += 1;
+                device_addr = Some(src);
 
-        packet_count += 1;
-        let data = &buf[..len];
+                let parsed = try_parse(data);
+                print_packet(packet_count, PacketDirection::DeviceToCloud, src, data, &parsed);
 
-        let packet = UdpTempPacket {
-            source: src,
-            raw: data.to_vec(),
-            raw_hex: hex_encode(data),
-            raw_ascii: lossy_ascii(data),
-        };
+                // Send to consumer (MQTT, etc.)
+                if let Some(ref tx) = config.packet_tx {
+                    let pkt = DevicePacket {
+                        source: src,
+                        raw: data.to_vec(),
+                        direction: PacketDirection::DeviceToCloud,
+                        parsed: parsed.clone(),
+                    };
+                    let _ = tx.try_send(pkt);
+                }
 
-        println!("--- Packet #{packet_count} from {src} ({len} bytes) ---");
-        println!("  Hex:   {}", packet.raw_hex);
-        println!("  ASCII: {}", packet.raw_ascii);
+                // Forward to cloud
+                if config.forward_to_cloud {
+                    if let Err(e) = cloud_socket.send_to(data, config.cloud_addr).await {
+                        eprintln!("  [!] Cloud forward failed: {e}");
+                    }
+                }
+            }
 
-        // Attempt to parse known patterns
-        if let Some(parsed) = try_parse_temp_packet(data) {
-            println!("  >> Parsed: {parsed}");
+            // Responses from the cloud
+            result = cloud_socket.recv_from(&mut cloud_buf) => {
+                let (len, src) = result.context("cloud recv_from failed")?;
+                let data = &cloud_buf[..len];
+
+                let parsed = try_parse(data);
+                print_packet(packet_count, PacketDirection::CloudToDevice, src, data, &parsed);
+
+                // Send to consumer
+                if let Some(ref tx) = config.packet_tx {
+                    let pkt = DevicePacket {
+                        source: src,
+                        raw: data.to_vec(),
+                        direction: PacketDirection::CloudToDevice,
+                        parsed: try_parse(data),
+                    };
+                    let _ = tx.try_send(pkt);
+                }
+
+                // Forward back to the device
+                if let Some(dev) = device_addr {
+                    if let Err(e) = listen_socket.send_to(data, dev).await {
+                        eprintln!("  [!] Device forward failed: {e}");
+                    }
+                }
+            }
         }
-
-        println!();
-
-        // Echo back an acknowledgement so the device doesn't retry
-        let _ = socket.send_to(b"+ok\r\n", src).await;
     }
 }
 
-/// Attempt to parse temperature data from the raw packet.
-///
-/// The exact format is not fully known yet — this function uses heuristics
-/// from the cloud API response format and common IoT packet patterns.
-fn try_parse_temp_packet(data: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(data).ok()?;
+/// Simple listen-only mode (no cloud forwarding).
+pub async fn listen(port: u16) -> Result<()> {
+    let cloud_addr = resolve_cloud_addr().await?;
+    run_proxy(ProxyConfig {
+        listen_port: port,
+        cloud_addr,
+        forward_to_cloud: false,
+        packet_tx: None,
+    })
+    .await
+}
 
-    // Try JSON format (unlikely from device, but possible)
-    if text.contains("temperature") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-            let ch1 = v.get("temperature_ch1").and_then(|v| v.as_f64());
-            let ch2 = v.get("temperature_ch2").and_then(|v| v.as_f64());
-            if let (Some(c1), Some(c2)) = (ch1, ch2) {
-                return Some(format!("JSON: ch1={c1:.1}°C, ch2={c2:.1}°C"));
+/// Resolve the cloud server address to a SocketAddr.
+pub async fn resolve_cloud_addr() -> Result<SocketAddr> {
+    use tokio::net::lookup_host;
+    let host_port = format!("{}:{}", protocol::CLOUD_HOST, protocol::udp::CLOUD_PORT);
+    let addr = lookup_host(&host_port)
+        .await
+        .with_context(|| format!("Failed to resolve {host_port}"))?
+        .next()
+        .with_context(|| format!("No addresses for {host_port}"))?;
+    Ok(addr)
+}
+
+fn print_packet(
+    num: u64,
+    dir: PacketDirection,
+    src: SocketAddr,
+    data: &[u8],
+    parsed: &Option<ParsedData>,
+) {
+    let hex = hex_encode(data);
+    let ascii = lossy_ascii(data);
+    println!("--- #{num} {dir} from {src} ({} bytes) ---", data.len());
+    println!("  Hex:   {hex}");
+    println!("  ASCII: {ascii}");
+    match parsed {
+        Some(ParsedData::Temperature(pkt)) => {
+            let active = pkt.active_channels();
+            if active.is_empty() {
+                println!("  >> Temp: no probes (device {})", pkt.device_id);
+            } else {
+                let temps: String = active
+                    .iter()
+                    .map(|(ch, t)| format!("CH{ch}: {t:.1}°C"))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                println!("  >> Temp: {temps} (device {})", pkt.device_id);
             }
         }
-    }
-
-    // Try comma-separated numeric values (common in cheap IoT devices)
-    let parts: Vec<&str> = text.trim().split(',').collect();
-    if parts.len() >= 2 {
-        if let (Ok(v1), Ok(v2)) = (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>())
-        {
-            if (-50.0..500.0).contains(&v1) && (-50.0..500.0).contains(&v2) {
-                return Some(format!("CSV: ch1={v1:.1}°C, ch2={v2:.1}°C"));
-            }
+        Some(ParsedData::Csv(parts)) => {
+            println!("  >> CSV: {}", parts.join(", "));
         }
+        Some(ParsedData::Unknown) => {
+            println!("  >> (unknown format)");
+        }
+        None => {}
+    }
+    println!();
+}
+
+/// Attempt to parse device data from a raw packet.
+fn try_parse(data: &[u8]) -> Option<ParsedData> {
+    // Try the known binary temperature packet format first
+    if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+        return Some(ParsedData::Temperature(pkt));
     }
 
-    // If data is short binary, try interpreting as 16-bit big-endian temps
-    if data.len() >= 4 && data.len() <= 32 && !text.chars().all(|c| c.is_ascii_graphic()) {
-        let t1 = i16::from_be_bytes([data[0], data[1]]) as f64 / 10.0;
-        let t2 = i16::from_be_bytes([data[2], data[3]]) as f64 / 10.0;
-        if (-50.0..500.0).contains(&t1) && (-50.0..500.0).contains(&t2) {
-            return Some(format!(
-                "Binary(BE/10): ch1={t1:.1}°C, ch2={t2:.1}°C (speculative)"
+    // Fallback: try text-based formats for unknown packet types
+    if let Ok(text) = std::str::from_utf8(data) {
+        let trimmed = text.trim();
+        let parts: Vec<&str> = trimmed.split(',').collect();
+        if parts.len() >= 2 {
+            return Some(ParsedData::Csv(
+                parts.iter().map(|s| s.to_string()).collect(),
             ));
         }
     }
 
-    None
+    Some(ParsedData::Unknown)
 }
 
-fn hex_encode(data: &[u8]) -> String {
+pub fn hex_encode(data: &[u8]) -> String {
     data.iter()
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()

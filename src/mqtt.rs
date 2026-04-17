@@ -227,7 +227,7 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
 }
 
 /// Build a minimal MQTT v3.1.1 CONNECT packet.
-fn build_mqtt_connect(
+pub fn build_mqtt_connect(
     client_id: &str,
     username: Option<&str>,
     password: Option<&str>,
@@ -279,7 +279,7 @@ fn build_mqtt_connect(
 }
 
 /// Build a minimal MQTT PUBLISH packet.
-fn build_mqtt_publish(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
+pub fn build_mqtt_publish(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
     let mut packet = Vec::new();
     let first_byte = 0x30 | if retain { 0x01 } else { 0x00 };
     packet.push(first_byte);
