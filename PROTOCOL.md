@@ -436,6 +436,63 @@ The cloud server immediately echoes back the same packet with:
 
 This echo may serve as an acknowledgment that the cloud received the data.
 
+### Alarm Packet Format (16 bytes)
+
+When an alarm temperature is set via the REST API (`set_alarm_temp`), the cloud
+sends a **16-byte alarm command** to the device via the same UDP channel. This
+sets the device's built-in alarm — the device will buzz when the temperature
+exceeds the threshold.
+
+```
+Offset  Len  Field                 Example Value
+0       1    Start delimiter       0x3C ('<')
+1       1    Packet type           0x54 ('T' — same as temperature)
+2       5    Device ID             02 CC 44 55 66 (raw bytes)
+7       2    Config                0x41 0x31 (ASCII "A1" = Alarm Channel 1)
+9       1    Direction             0x00 (cloud→device)
+10      1    Data byte count       0x02 (2 bytes of alarm data)
+11      1    Padding               0x00
+12      2    Alarm temp (u16 LE)   0xEE 0x02 = 750 → 75.0°C
+14      1    Checksum              0x82
+15      1    End delimiter         0x3E ('>')
+```
+
+**Key differences from temperature packets:**
+- **16 bytes** (not 18)
+- Config bytes `"A1"` or `"A2"` (not `"00"`)
+- Alarm temperature is **little-endian** u16 (temp packets use big-endian)
+- Checksum covers bytes 1..14: `(sum(bytes[1..14]) + 0x3C) & 0xFF`
+
+#### Config Byte Values
+
+| Bytes 7-8 | ASCII | Meaning              |
+|-----------|-------|----------------------|
+| 30 30     | "00"  | Temperature report    |
+| 41 31     | "A1"  | Alarm channel 1      |
+| 41 32     | "A2"  | Alarm channel 2      |
+
+#### Captured Examples
+
+Set alarm to 75.0°C on channel 1:
+```
+3C 54 02 CC 44 55 66 41 31 00 02 00 EE 02 C1 3E
+```
+Decoded: `"A1"`, alarm = 0x02EE (LE) = 750 → **75.0°C**
+
+Set alarm to 100.0°C on channel 1:
+```
+3C 54 02 CC 44 55 66 41 31 00 02 00 E8 03 BC 3E
+```
+Decoded: `"A1"`, alarm = 0x03E8 (LE) = 1000 → **100.0°C**
+
+#### Sending Alarm Locally
+
+The alarm can be set without the cloud by sending the packet directly to
+the device's UDP source port:
+```
+grillsense local set-alarm --ch1 75.0
+```
+
 ### UDP Proxy Architecture
 
 A local proxy can sit between the device and cloud to extract data locally
@@ -450,8 +507,8 @@ Device ──UDP──► [Local Proxy :17000] ──UDP──► Cloud :17000
 ```
 
 To set this up:
-1. Run the proxy: `grillsense proxy --port 17000`
-2. Redirect the device: `grillsense configure --ip <device-ip> --ssid <ssid> -P <pass> --server <proxy-ip>`
+1. Run the proxy: `grillsense local proxy --port 17000`
+2. Redirect the device: `grillsense local configure --ip <device-ip> --ssid <ssid> -P <pass> --server <proxy-ip>`
 3. The proxy forwards all traffic to the cloud (official app keeps working)
 4. Optionally add `--mqtt` to publish temperatures to Home Assistant via MQTT
 

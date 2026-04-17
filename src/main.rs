@@ -756,24 +756,93 @@ async fn cmd_local_set_alarm(
         anyhow::bail!("At least one threshold required: --ch1 <temp> and/or --ch2 <temp>");
     }
 
-    // TODO: Once we've captured the alarm packet format (via 'local capture'),
-    // this will construct and send the alarm packet directly to the device.
-    // For now, print what we know and explain next steps.
     println!("GrillSense Local Set-Alarm");
     println!("==========================");
+    if let Some(t) = ch1_threshold {
+        println!("  CH1 alarm: {t:.1}°C");
+    }
+    if let Some(t) = ch2_threshold {
+        println!("  CH2 alarm: {t:.1}°C");
+    }
+    println!("  Listen:    0.0.0.0:{port}");
     println!();
-    println!("The device has a built-in alarm that buzzes when temperature");
-    println!("exceeds a threshold. The cloud pushes this threshold to the");
-    println!("device via the UDP channel.");
+
+    // Bind to the port the device is sending to
+    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
+        .await
+        .with_context(|| format!("Failed to bind UDP port {port}"))?;
+
+    println!("Waiting for a device packet to learn its address and ID...");
+
+    // Wait for a packet from the device to learn its address and device ID
+    let mut buf = [0u8; 256];
+    let (len, device_addr) = sock.recv_from(&mut buf).await?;
+    let data = &buf[..len];
+
+    let device_id_bytes = protocol::udp::parse_device_id_bytes(data)
+        .context("Could not parse device ID from packet")?;
+    let device_id: String = device_id_bytes.iter().map(|b| format!("{b:02X}")).collect();
+
+    println!("  Device found: {device_id} at {device_addr}");
     println!();
-    println!("To reverse-engineer the alarm packet format, run:");
+
+    // Echo back to keep device happy
+    if let Some(echo) = build_echo(data) {
+        let _ = sock.send_to(&echo, device_addr).await;
+    }
+
+    // Build and send alarm packet(s)
+    let mut sent = 0;
+    if let Some(temp) = ch1_threshold {
+        let pkt = protocol::udp::build_alarm_packet(&device_id_bytes, 1, temp);
+        sock.send_to(&pkt, device_addr).await?;
+        println!("  ✓ Sent CH1 alarm: {temp:.1}°C → {device_addr}");
+        println!("    Packet: {}", udp::hex_encode(&pkt));
+        sent += 1;
+    }
+    if let Some(temp) = ch2_threshold {
+        let pkt = protocol::udp::build_alarm_packet(&device_id_bytes, 2, temp);
+        sock.send_to(&pkt, device_addr).await?;
+        println!("  ✓ Sent CH2 alarm: {temp:.1}°C → {device_addr}");
+        println!("    Packet: {}", udp::hex_encode(&pkt));
+        sent += 1;
+    }
+
     println!();
-    println!("  grillsense local capture --mac <WIFI_MAC> -T {:.1} --port {port}",
-        ch1_threshold.or(ch2_threshold).unwrap_or(75.0));
+    println!("Sent {sent} alarm packet(s). Listening for confirmation...");
     println!();
-    println!("This will proxy device traffic through the cloud while");
-    println!("triggering a cloud set-alarm, and capture any new packet");
-    println!("types the cloud sends to the device.");
+
+    // Continue listening briefly to echo back and see if device behavior changes
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let timeout = tokio::time::sleep_until(deadline);
+        tokio::select! {
+            _ = timeout => break,
+            result = sock.recv_from(&mut buf) => {
+                let (len, addr) = result?;
+                let data = &buf[..len];
+
+                // Check for alarm acknowledgment
+                if let Some((ch, temp)) = protocol::udp::parse_alarm_packet(data) {
+                    println!("  [alarm ack] CH{ch} alarm = {temp:.1}°C from {addr}");
+                } else if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+                    let active = pkt.active_channels();
+                    let temps: Vec<String> = active.iter().map(|(ch, t)| format!("CH{ch}={t:.1}°C")).collect();
+                    print!("\r  [temp] {}  ", temps.join(" | "));
+                    io::stdout().flush().ok();
+                    // Echo back
+                    if let Some(echo) = build_echo(data) {
+                        let _ = sock.send_to(&echo, addr).await;
+                    }
+                } else {
+                    println!("  [unknown] {} bytes from {addr}: {}", data.len(), udp::hex_encode(data));
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("Done. The device alarm should now be set.");
     Ok(())
 }
 

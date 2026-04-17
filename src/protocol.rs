@@ -210,6 +210,90 @@ pub mod udp {
         let sum: u32 = content.iter().map(|&b| b as u32).sum();
         ((sum + START_BYTE as u32) & 0xFF) as u8
     }
+
+    // Alarm packet constants
+    /// Config bytes for alarm channel 1: ASCII "A1"
+    pub const CONFIG_ALARM_CH1: [u8; 2] = [0x41, 0x31]; // 'A', '1'
+    /// Config bytes for alarm channel 2: ASCII "A2"
+    pub const CONFIG_ALARM_CH2: [u8; 2] = [0x41, 0x32]; // 'A', '2'
+    /// Fixed packet length for alarm commands.
+    pub const ALARM_PACKET_LEN: usize = 16;
+
+    /// Build an alarm packet to send to the device.
+    ///
+    /// 16-byte format (captured from cloud):
+    /// ```text
+    /// [0]     0x3C      Start
+    /// [1]     0x54      Type 'T'
+    /// [2-6]   devid     Device ID (5 bytes)
+    /// [7-8]   "A1"/"A2" Alarm config (channel)
+    /// [9]     0x00      Direction (cloud→device)
+    /// [10]    0x02      Data byte count
+    /// [11]    0x00      High byte / padding
+    /// [12-13] u16 LE    Alarm temp (value × 10, little-endian)
+    /// [14]    checksum  (sum(bytes[1..14]) + 0x3C) & 0xFF
+    /// [15]    0x3E      End
+    /// ```
+    pub fn build_alarm_packet(
+        device_id_bytes: &[u8; 5],
+        channel: u8,
+        temp_celsius: f64,
+    ) -> Vec<u8> {
+        let config = match channel {
+            2 => CONFIG_ALARM_CH2,
+            _ => CONFIG_ALARM_CH1,
+        };
+        let raw_temp = (temp_celsius * 10.0) as u16;
+
+        let mut pkt = vec![START_BYTE, TYPE_TEMP];
+        pkt.extend_from_slice(device_id_bytes);
+        pkt.extend_from_slice(&config);
+        pkt.push(0x00); // direction
+        pkt.push(0x02); // data byte count
+        pkt.push(0x00); // high byte / padding
+        pkt.push((raw_temp & 0xFF) as u8);        // low byte (LE)
+        pkt.push(((raw_temp >> 8) & 0xFF) as u8); // high byte (LE)
+        let checksum = compute_checksum(&pkt[1..]);
+        pkt.push(checksum);
+        pkt.push(END_BYTE);
+        debug_assert_eq!(pkt.len(), ALARM_PACKET_LEN);
+        pkt
+    }
+
+    /// Parse an alarm packet. Returns (channel, temp_celsius) if valid.
+    pub fn parse_alarm_packet(data: &[u8]) -> Option<(u8, f64)> {
+        if data.len() != ALARM_PACKET_LEN {
+            return None;
+        }
+        if data[0] != START_BYTE || data[15] != END_BYTE || data[1] != TYPE_TEMP {
+            return None;
+        }
+        // Check config bytes for alarm
+        let channel = match (data[7], data[8]) {
+            (0x41, 0x31) => 1, // 'A1'
+            (0x41, 0x32) => 2, // 'A2'
+            _ => return None,
+        };
+        // Verify checksum
+        let expected = compute_checksum(&data[1..14]);
+        if data[14] != expected {
+            return None;
+        }
+        // Alarm temp: u16 little-endian at bytes 12-13, ÷10
+        let raw_temp = (data[12] as u16) | ((data[13] as u16) << 8);
+        let temp_celsius = raw_temp as f64 / 10.0;
+        Some((channel, temp_celsius))
+    }
+
+    /// Parse the device ID bytes from a raw packet (works for both temp and alarm).
+    pub fn parse_device_id_bytes(data: &[u8]) -> Option<[u8; 5]> {
+        if data.len() < 7 {
+            return None;
+        }
+        let mut id = [0u8; 5];
+        id.copy_from_slice(&data[2..7]);
+        Some(id)
+    }
 }
 
 use serde::Deserialize;
@@ -528,5 +612,62 @@ mod tests {
         assert!(result.online());
         assert!((result.temperature_ch1 - 21.6).abs() < 0.01);
         assert_eq!(result.temperature_ch2, 0.0);
+    }
+
+    #[test]
+    fn test_alarm_packet_parse_75c() {
+        // Alarm packet: cloud set 75°C on channel 1 (anonymized device ID)
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
+            0x31, 0x00, 0x02, 0x00, 0xEE, 0x02, 0xC1, 0x3E,
+        ];
+        let (ch, temp) = udp::parse_alarm_packet(&data).expect("should parse");
+        assert_eq!(ch, 1);
+        assert!((temp - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_alarm_packet_parse_100c() {
+        // Alarm packet: cloud set 100°C on channel 1 (anonymized device ID)
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
+            0x31, 0x00, 0x02, 0x00, 0xE8, 0x03, 0xBC, 0x3E,
+        ];
+        let (ch, temp) = udp::parse_alarm_packet(&data).expect("should parse");
+        assert_eq!(ch, 1);
+        assert!((temp - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_alarm_packet_build_roundtrip() {
+        let dev_id: [u8; 5] = [0x02, 0xCC, 0x44, 0x55, 0x66];
+        let pkt = udp::build_alarm_packet(&dev_id, 1, 75.0);
+        assert_eq!(pkt.len(), 16);
+        let (ch, temp) = udp::parse_alarm_packet(&pkt).expect("roundtrip should parse");
+        assert_eq!(ch, 1);
+        assert!((temp - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_alarm_packet_build_matches_captured() {
+        // Verify our builder produces the exact same bytes as captured (anonymized)
+        let dev_id: [u8; 5] = [0x02, 0xCC, 0x44, 0x55, 0x66];
+        let pkt = udp::build_alarm_packet(&dev_id, 1, 75.0);
+        let expected: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x41,
+            0x31, 0x00, 0x02, 0x00, 0xEE, 0x02, 0xC1, 0x3E,
+        ];
+        assert_eq!(pkt, expected);
+    }
+
+    #[test]
+    fn test_alarm_packet_ch2() {
+        let dev_id: [u8; 5] = [0x02, 0xCC, 0x44, 0x55, 0x66];
+        let pkt = udp::build_alarm_packet(&dev_id, 2, 80.0);
+        assert_eq!(pkt[7], 0x41); // 'A'
+        assert_eq!(pkt[8], 0x32); // '2'
+        let (ch, temp) = udp::parse_alarm_packet(&pkt).expect("should parse ch2");
+        assert_eq!(ch, 2);
+        assert!((temp - 80.0).abs() < 0.01);
     }
 }
