@@ -169,40 +169,38 @@ The full reverse-engineered protocol is documented in
 
 ## Home Assistant add-on
 
-The easiest way to run GrillSense on a Home Assistant OS / Supervised
-install is as a local add-on.
-
 ### Install
 
-1. Clone or copy this repository to `/addons/grillsense/` on your HA host
-   (accessible via the Samba or SSH add-ons):
+1. In Home Assistant go to **Settings → Apps → ⋮ → Repositories**
+2. Add this repository URL:
 
-   ```sh
-   cd /addons
-   git clone https://github.com/user/grillsense.git
+   ```
+   https://github.com/bjornwein/ha-apps
    ```
 
-2. In Home Assistant go to **Settings → Apps** and
-   click the ⟳ button (top-right). "GrillSense Thermometer" should
-   appear under **Local apps**.
+3. Refresh — **GrillSense Thermometer** appears in the app list
+4. Click it, then **Install**
 
-3. Click it, then **Install**. The first build takes a few minutes
-   (compiles Rust from source).
+Or click here to add the repository automatically:
 
-4. On the **Configuration** tab choose your operating mode:
+[![Add repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fbjornwein%2Fha-apps)
 
-   | Option | Description |
-   |--------|-------------|
-   | `mode` | `local` (device sends UDP directly) or `cloud` (poll vendor API) |
-   | `udp_port` | UDP port the device targets (default `17000`, local mode only) |
-   | `device_name` | Name shown in Home Assistant |
-   | `cloud_email` / `cloud_password` | Vendor account (cloud mode only) |
+### Configure
 
-   MQTT credentials are auto-detected from the Mosquitto add-on.
-   Override with `mqtt_host` / `mqtt_user` / `mqtt_pass` if needed.
+On the **Configuration** tab choose your operating mode:
 
-5. **Start** the add-on. Temperature entities appear automatically via
-   MQTT discovery.
+| Option | Description |
+|--------|-------------|
+| `mode` | `local` (device sends UDP directly) or `cloud` (poll vendor API) |
+| `udp_port` | UDP port the device targets (default `17000`, local mode only) |
+| `device_name` | Name shown in Home Assistant |
+| `cloud_email` / `cloud_password` | Vendor account (cloud mode only) |
+
+MQTT credentials are auto-detected from the Mosquitto add-on.
+Override with `mqtt_host` / `mqtt_user` / `mqtt_pass` if needed.
+
+**Start** the add-on. Temperature entities appear automatically via
+MQTT discovery.
 
 ### What gets created in HA
 
