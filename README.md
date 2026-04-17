@@ -182,9 +182,9 @@ install is as a local add-on.
    git clone https://github.com/user/grillsense.git
    ```
 
-2. In Home Assistant go to **Settings → Add-ons → Add-on Store** and
+2. In Home Assistant go to **Settings → Apps** and
    click the ⟳ button (top-right). "GrillSense Thermometer" should
-   appear under **Local add-ons**.
+   appear under **Local apps**.
 
 3. Click it, then **Install**. The first build takes a few minutes
    (compiles Rust from source).
