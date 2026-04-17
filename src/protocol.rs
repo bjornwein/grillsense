@@ -67,6 +67,16 @@ pub mod ap {
     pub const CMD_ACK: &str = "+ok";
 }
 
+/// LAN discovery constants.
+pub mod lan {
+    /// UDP port for Hi-Flying module discovery and AT commands.
+    pub const DISCOVERY_PORT: u16 = 48899;
+    /// Magic handshake string for discovery.
+    pub const DISCOVERY_MAGIC: &str = "HF-A11ASSISTHREAD";
+    /// Response to enter AT command mode after discovery.
+    pub const AT_MODE_ENTER: &str = "+ok";
+}
+
 /// UDP protocol constants.
 pub mod udp {
     pub const CLOUD_PORT: u16 = 17000;

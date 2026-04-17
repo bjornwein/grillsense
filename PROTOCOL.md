@@ -78,27 +78,93 @@ MAC address is returned as `+ok=<MAC>` in step 3.
 - Each step has a 3-second timeout
 - Up to 3 retries per step before aborting
 
+## LAN Discovery & AT Command Interface
+
+The HF-LPT230 WiFi module exposes an AT command interface over **UDP port 48899**,
+accessible from the local network in both AP and STA modes.
+
+### Discovery Protocol
+
+Send the magic string `HF-A11ASSISTHREAD` as a UDP datagram to port 48899
+(unicast or broadcast). The module responds with:
+
+```
+<ip>,<mac>,<model>
+```
+
+Example response: `192.168.1.50,AABBCC445566,HF-LPT230`
+
+**Note:** The MAC is returned **uppercase, no separators**.
+
+### AT Command Mode over UDP
+
+After discovery, enter AT command mode by sending `+ok` and then issue
+AT commands. Each command session requires the full handshake:
+
+1. Send `HF-A11ASSISTHREAD` → receive `<ip>,<mac>,<model>`
+2. Send `+ok` → enters AT mode
+3. Send `AT+<CMD>\r\n` → receive `+ok` or `+ok=<value>`
+
+### Verified AT Commands
+
+Confirmed working on HF-LPT230 firmware v4.12.17:
+
+| Command              | Description                      | Example Response                       |
+|----------------------|----------------------------------|----------------------------------------|
+| `AT+WSMAC`           | Get WiFi MAC address             | `+ok=AABBCC445566`                     |
+| `AT+WSSSID`          | Get/set WiFi SSID                | `+ok=MyNetwork`                       |
+| `AT+WSKEY`           | Get/set WiFi security & password | `+ok=WPA2PSK,AES,<password>`           |
+| `AT+NETP`            | Get/set network endpoint         | `+ok=UDP,Client,17000,smartserver...`  |
+| `AT+WMODE`           | Get/set WiFi mode (STA/AP)       | `+ok=STA`                              |
+| `AT+UART`            | Get/set UART settings            | `+ok=9600,8,1,None,NFC`               |
+| `AT+VER`             | Get firmware version             | `+ok=4.12.17 (2019-01-09 10:30 1M)`   |
+| `AT+TCPTO`           | Get/set TCP timeout              | `+ok=300`                              |
+| `AT+Z`               | Reboot (preserves settings)      | `+ok`                                  |
+| `AT+RELD`            | **Factory reset** (wipes config) | `+ok=rebooting...`                     |
+
+**⚠️ WARNING**: `AT+RELD` performs a factory reset, NOT a simple reboot. Use `AT+Z` to reboot.
+
+### WiFi Key Formats
+
+The `AT+WSKEY` command uses the format: `<auth>,<encryption>,<password>`
+
+| Auth Type  | Encryption | Example                                  |
+|------------|------------|------------------------------------------|
+| `OPEN`     | `NONE`     | `AT+WSKEY=OPEN,NONE,`                    |
+| `WPA2PSK`  | `AES`      | `AT+WSKEY=WPA2PSK,AES,mypassword`        |
+| `WPA2PSK`  | `TKIPAES`  | `AT+WSKEY=WPA2PSK,TKIPAES,mypassword`    |
+
+### Hardware Details
+
+- **WiFi module**: Hi-Flying HF-LPT230 (similar to HF-A11 family)
+- **Firmware**: v4.12.17 (2019-01-09)
+- **UART to MCU**: 9600 baud, 8N1, NFC flow control
+- **WiFi MAC**: `AA:BB:CC:44:55:66` (Hi-Flying OUI `AA:BB:CC`)
+- **AP MAC**: `AA:BB:CC:44:55:67` (one byte higher than STA MAC)
+
 ## WiFi AP Mode Configuration
 
-When not yet provisioned (or in reset state), the device runs as a WiFi AP:
+When not yet provisioned (or after factory reset), the device runs as a WiFi AP:
 
 - **SSID**: `LivingSmart`
+- **Security**: Open (no password)
 - **IP**: `10.10.100.254`
-- **UDP Port**: `8800`
+- **UDP Port**: `48899` (AT commands) / `8800` (legacy)
 
-### AP Mode Command Sequence
+### AP Mode Reconfiguration
 
-Uses UDP datagrams to `10.10.100.254:8800`:
+Connect to the `LivingSmart` WiFi network, then send AT commands to
+`10.10.100.254:48899`:
 
-| Step | Command Sent           | Expected Response | Notes                     |
-|------|------------------------|-------------------|---------------------------|
-| 1    | `HF-A11ASSISTHREAD`   | `+ok`             | Handshake / discovery     |
-| 2    | `+ok`                 | —                 | Acknowledge, then unicast |
-| 3    | `AT+NETP=UDP,CLIENT,10000,47.52.149.125\r\n` | `+ok` | Set cloud endpoint   |
-| 4    | `AT+WSSSID=<ssid>\r\n`| `+ok`             | Set WiFi SSID             |
-| 5    | `AT+WSKEY=<pwd>\r\n`  | `+ok`             | Set WiFi password         |
-| 6    | `AT+WMODE=STA\r\n`    | `+ok`             | Set station mode          |
-| 7    | `AT+Z\r\n`            | `+ok`             | Reboot                    |
+| Step | Command Sent                                        | Expected Response     | Notes                          |
+|------|-----------------------------------------------------|-----------------------|--------------------------------|
+| 1    | `HF-A11ASSISTHREAD`                                | `10.10.100.254,...`   | Discovery handshake            |
+| 2    | `+ok`                                              | —                     | Enter AT mode                  |
+| 3    | `AT+WSSSID=<ssid>`                                 | `+ok`                 | Set WiFi SSID                  |
+| 4    | `AT+WSKEY=WPA2PSK,AES,<password>`                  | `+ok`                 | Set WiFi key                   |
+| 5    | `AT+NETP=UDP,CLIENT,17000,smartserver.emaxtime.cn` | `+ok`                 | Set cloud endpoint             |
+| 6    | `AT+WMODE=STA`                                     | `+ok`                 | Set station mode               |
+| 7    | `AT+Z`                                             | `+ok`                 | Reboot (preserves settings)    |
 
 ### AP Mode BLE-bridged Commands
 

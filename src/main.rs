@@ -1,5 +1,6 @@
 mod ble;
 mod cloud;
+mod lan;
 mod mqtt;
 mod protocol;
 mod udp;
@@ -71,6 +72,45 @@ enum Commands {
         port: u16,
     },
 
+    /// Discover HF modules on the local network
+    Discover {
+        /// Specific IP to probe (omit for broadcast scan)
+        #[arg(short, long)]
+        ip: Option<String>,
+        /// Discovery timeout in seconds
+        #[arg(short, long, default_value = "3")]
+        timeout: u64,
+    },
+
+    /// Query device info via LAN AT commands
+    DeviceInfo {
+        /// Device IP address
+        #[arg(short, long)]
+        ip: String,
+    },
+
+    /// Reconfigure device WiFi and server settings via LAN
+    Configure {
+        /// Device IP address
+        #[arg(short, long)]
+        ip: String,
+        /// WiFi SSID
+        #[arg(short, long)]
+        ssid: String,
+        /// WiFi password (empty for open networks)
+        #[arg(short = 'P', long, default_value = "")]
+        wifi_password: String,
+        /// Server hostname or IP
+        #[arg(long, default_value = "smartserver.emaxtime.cn")]
+        server: String,
+        /// Server UDP port
+        #[arg(long, default_value = "17000")]
+        server_port: u16,
+        /// Skip reboot after configuration
+        #[arg(long)]
+        no_reboot: bool,
+    },
+
     /// Show BLE provisioning sequence (dry-run)
     BleProvision {
         /// WiFi SSID to configure
@@ -134,6 +174,16 @@ async fn main() -> Result<()> {
         } => cmd_monitor(&token, &mac, interval, fahrenheit).await,
         Commands::SetAlarm { token, mac, temp } => cmd_set_alarm(&token, &mac, temp).await,
         Commands::UdpListen { port } => udp::listen(port).await,
+        Commands::Discover { ip, timeout: t } => cmd_discover(ip.as_deref(), t).await,
+        Commands::DeviceInfo { ip } => cmd_device_info(&ip).await,
+        Commands::Configure {
+            ip,
+            ssid,
+            wifi_password,
+            server,
+            server_port,
+            no_reboot,
+        } => cmd_configure(&ip, &ssid, &wifi_password, &server, server_port, !no_reboot).await,
         Commands::BleProvision {
             ssid,
             wifi_password,
@@ -287,6 +337,72 @@ async fn cmd_set_alarm(token: &str, mac: &str, temp: f64) -> Result<()> {
     client.set_alarm_temp(temp).await?;
     println!("Alarm temperature set to {:.1}°C for device {}", temp, mac);
 
+    Ok(())
+}
+
+async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
+    if let Some(ip) = ip {
+        println!("Probing {ip}...");
+        let dev = lan::discover_unicast(ip).await?;
+        println!("Found: {} ({}) at {}", dev.model, dev.mac, dev.ip);
+    } else {
+        println!("Scanning local network ({}s timeout)...", timeout_secs);
+        let devices = lan::discover_broadcast(timeout_secs).await?;
+        if devices.is_empty() {
+            println!("No HF modules found.");
+            return Ok(());
+        }
+        println!(
+            "{:<16} {:<14} {:<12}",
+            "IP", "MAC", "Model"
+        );
+        println!("{}", "-".repeat(44));
+        for dev in &devices {
+            println!("{:<16} {:<14} {:<12}", dev.ip, dev.mac, dev.model);
+        }
+        println!();
+        if devices.len() == 1 {
+            println!("Query this device:");
+            println!("  grillsense device-info --ip {}", devices[0].ip);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_device_info(ip: &str) -> Result<()> {
+    println!("Querying device at {ip}...");
+    println!();
+
+    let dev = lan::discover_unicast(ip).await?;
+    println!("Device: {} ({})", dev.model, dev.mac);
+    println!();
+
+    let report = lan::query_device_info(ip).await?;
+    print!("{report}");
+    Ok(())
+}
+
+async fn cmd_configure(
+    ip: &str,
+    ssid: &str,
+    wifi_password: &str,
+    server: &str,
+    server_port: u16,
+    reboot: bool,
+) -> Result<()> {
+    println!("Configuring device at {ip}...");
+    println!("  SSID:   {ssid}");
+    println!("  Server: {server}:{server_port}");
+    println!();
+
+    lan::configure_device(ip, ssid, wifi_password, server, server_port, reboot).await?;
+
+    println!();
+    if reboot {
+        println!("Device is rebooting. It should rejoin the network in ~10 seconds.");
+    } else {
+        println!("Configuration saved. Reboot the device to apply (AT+Z or power cycle).");
+    }
     Ok(())
 }
 
