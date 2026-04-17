@@ -159,18 +159,6 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
     }
 }
 
-/// Simple listen-only mode (no cloud forwarding).
-pub async fn listen(port: u16) -> Result<()> {
-    let cloud_addr = resolve_cloud_addr().await?;
-    run_proxy(ProxyConfig {
-        listen_port: port,
-        cloud_addr,
-        forward_to_cloud: false,
-        packet_tx: None,
-    })
-    .await
-}
-
 /// Resolve the cloud server address to a SocketAddr.
 pub async fn resolve_cloud_addr() -> Result<SocketAddr> {
     use tokio::net::lookup_host;

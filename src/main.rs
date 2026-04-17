@@ -19,6 +19,42 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Cloud API commands (requires internet)
+    Cloud {
+        #[command(subcommand)]
+        command: CloudCommands,
+    },
+
+    /// Local device commands (LAN only, no cloud needed)
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
+
+    /// Show BLE provisioning sequence (dry-run)
+    BleProvision {
+        /// WiFi SSID to configure
+        #[arg(short = 's', long)]
+        ssid: String,
+        /// WiFi password
+        #[arg(short = 'p', long)]
+        wifi_password: String,
+        /// Local server IP (omit to use cloud server)
+        #[arg(short, long)]
+        local_ip: Option<String>,
+        /// Local server port
+        #[arg(short = 'P', long, default_value = "17000")]
+        local_port: u16,
+    },
+
+    /// Show protocol information
+    Protocol,
+}
+
+// ---------- Cloud subcommands ----------
+
+#[derive(Subcommand)]
+enum CloudCommands {
     /// Login to the GrillSense cloud
     Login {
         /// Email address
@@ -36,9 +72,9 @@ enum Commands {
         token: String,
     },
 
-    /// Monitor temperature readings in real-time
+    /// Monitor temperature via cloud API polling
     Monitor {
-        /// Device MAC address (WiFi MAC from 'discover' command)
+        /// Device MAC address (WiFi MAC from 'local discover')
         #[arg(short, long)]
         mac: String,
         /// Auth token (optional — not needed for temperature reads)
@@ -52,7 +88,7 @@ enum Commands {
         fahrenheit: bool,
     },
 
-    /// Set alarm temperature
+    /// Set alarm temperature on the cloud server
     SetAlarm {
         /// Auth token (from login)
         #[arg(short, long)]
@@ -65,13 +101,39 @@ enum Commands {
         temp: f64,
     },
 
-    /// Listen for UDP packets from the device (requires traffic redirection)
-    UdpListen {
-        /// UDP port to listen on
-        #[arg(short, long, default_value = "17000")]
-        port: u16,
+    /// Bridge cloud temperature data to Home Assistant via MQTT
+    Bridge {
+        /// Auth token (from login)
+        #[arg(short, long)]
+        token: String,
+        /// Device MAC address
+        #[arg(short, long)]
+        mac: String,
+        /// MQTT broker host
+        #[arg(long, default_value = "localhost")]
+        mqtt_host: String,
+        /// MQTT broker port
+        #[arg(long, default_value = "1883")]
+        mqtt_port: u16,
+        /// MQTT username
+        #[arg(long)]
+        mqtt_user: Option<String>,
+        /// MQTT password
+        #[arg(long)]
+        mqtt_pass: Option<String>,
+        /// Device name in Home Assistant
+        #[arg(long, default_value = "BBQ Thermometer")]
+        device_name: String,
+        /// Polling interval in seconds
+        #[arg(short, long, default_value = "3")]
+        interval: u64,
     },
+}
 
+// ---------- Local subcommands ----------
+
+#[derive(Subcommand)]
+enum LocalCommands {
     /// Discover HF modules on the local network
     Discover {
         /// Specific IP to probe (omit for broadcast scan)
@@ -83,7 +145,7 @@ enum Commands {
     },
 
     /// Query device info via LAN AT commands
-    DeviceInfo {
+    Info {
         /// Device IP address
         #[arg(short, long)]
         ip: String,
@@ -111,58 +173,14 @@ enum Commands {
         no_reboot: bool,
     },
 
-    /// Show BLE provisioning sequence (dry-run)
-    BleProvision {
-        /// WiFi SSID to configure
-        #[arg(short = 's', long)]
-        ssid: String,
-        /// WiFi password
-        #[arg(short = 'p', long)]
-        wifi_password: String,
-        /// Local server IP (omit to use cloud server)
-        #[arg(short, long)]
-        local_ip: Option<String>,
-        /// Local server port
-        #[arg(short = 'P', long, default_value = "17000")]
-        local_port: u16,
-    },
-
-    /// Bridge temperature data to Home Assistant via MQTT
-    HaBridge {
-        /// Auth token (from login)
-        #[arg(short, long)]
-        token: String,
-        /// Device MAC address
-        #[arg(short, long)]
-        mac: String,
-        /// MQTT broker host
-        #[arg(long, default_value = "localhost")]
-        mqtt_host: String,
-        /// MQTT broker port
-        #[arg(long, default_value = "1883")]
-        mqtt_port: u16,
-        /// MQTT username
-        #[arg(long)]
-        mqtt_user: Option<String>,
-        /// MQTT password
-        #[arg(long)]
-        mqtt_pass: Option<String>,
-        /// Device name in Home Assistant
-        #[arg(long, default_value = "BBQ Thermometer")]
-        device_name: String,
-        /// Polling interval in seconds
-        #[arg(short, long, default_value = "3")]
-        interval: u64,
-    },
-
-    /// Run UDP proxy: receive device data, forward to cloud + MQTT
+    /// UDP proxy: intercept device traffic, forward to cloud + MQTT
     Proxy {
         /// UDP port to listen on
         #[arg(short, long, default_value = "17000")]
         port: u16,
-        /// Forward packets to the cloud server (keeps official app working)
-        #[arg(long, default_value = "true")]
-        forward: bool,
+        /// Disable forwarding to cloud (local-only mode)
+        #[arg(long)]
+        no_forward: bool,
         /// Also publish to MQTT for Home Assistant
         #[arg(long)]
         mqtt: bool,
@@ -186,8 +204,31 @@ enum Commands {
         device_name: String,
     },
 
-    /// Show protocol information
-    Protocol,
+    /// Monitor temperature from local UDP packets (device must point here)
+    Monitor {
+        /// UDP port to listen on
+        #[arg(short, long, default_value = "17000")]
+        port: u16,
+        /// Show temperature in Fahrenheit
+        #[arg(short = 'F', long)]
+        fahrenheit: bool,
+    },
+
+    /// Set local alarm — alerts when temperature exceeds threshold
+    SetAlarm {
+        /// UDP port to listen on
+        #[arg(short, long, default_value = "17000")]
+        port: u16,
+        /// Alarm threshold for channel 1 (°C)
+        #[arg(long)]
+        ch1: Option<f64>,
+        /// Alarm threshold for channel 2 (°C)
+        #[arg(long)]
+        ch2: Option<f64>,
+        /// Forward packets to cloud while monitoring
+        #[arg(long)]
+        forward: bool,
+    },
 }
 
 #[tokio::main]
@@ -195,26 +236,88 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Login { email, password } => cmd_login(&email, &password).await,
-        Commands::Devices { token } => cmd_devices(&token).await,
-        Commands::Monitor {
-            token,
-            mac,
-            interval,
-            fahrenheit,
-        } => cmd_monitor(&token, &mac, interval, fahrenheit).await,
-        Commands::SetAlarm { token, mac, temp } => cmd_set_alarm(&token, &mac, temp).await,
-        Commands::UdpListen { port } => udp::listen(port).await,
-        Commands::Discover { ip, timeout: t } => cmd_discover(ip.as_deref(), t).await,
-        Commands::DeviceInfo { ip } => cmd_device_info(&ip).await,
-        Commands::Configure {
-            ip,
-            ssid,
-            wifi_password,
-            server,
-            server_port,
-            no_reboot,
-        } => cmd_configure(&ip, &ssid, &wifi_password, &server, server_port, !no_reboot).await,
+        Commands::Cloud { command } => match command {
+            CloudCommands::Login { email, password } => cmd_login(&email, &password).await,
+            CloudCommands::Devices { token } => cmd_devices(&token).await,
+            CloudCommands::Monitor {
+                token,
+                mac,
+                interval,
+                fahrenheit,
+            } => cmd_cloud_monitor(&token, &mac, interval, fahrenheit).await,
+            CloudCommands::SetAlarm { token, mac, temp } => {
+                cmd_cloud_set_alarm(&token, &mac, temp).await
+            }
+            CloudCommands::Bridge {
+                token,
+                mac,
+                mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                device_name,
+                interval,
+            } => {
+                cmd_cloud_bridge(
+                    &token,
+                    &mac,
+                    &mqtt_host,
+                    mqtt_port,
+                    mqtt_user,
+                    mqtt_pass,
+                    &device_name,
+                    interval,
+                )
+                .await
+            }
+        },
+        Commands::Local { command } => match command {
+            LocalCommands::Discover { ip, timeout: t } => cmd_discover(ip.as_deref(), t).await,
+            LocalCommands::Info { ip } => cmd_device_info(&ip).await,
+            LocalCommands::Configure {
+                ip,
+                ssid,
+                wifi_password,
+                server,
+                server_port,
+                no_reboot,
+            } => {
+                cmd_configure(&ip, &ssid, &wifi_password, &server, server_port, !no_reboot).await
+            }
+            LocalCommands::Proxy {
+                port,
+                no_forward,
+                mqtt,
+                mac,
+                mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                device_name,
+            } => {
+                cmd_proxy(
+                    port,
+                    !no_forward,
+                    mqtt,
+                    mac,
+                    &mqtt_host,
+                    mqtt_port,
+                    mqtt_user,
+                    mqtt_pass,
+                    &device_name,
+                )
+                .await
+            }
+            LocalCommands::Monitor { port, fahrenheit } => {
+                cmd_local_monitor(port, fahrenheit).await
+            }
+            LocalCommands::SetAlarm {
+                port,
+                ch1,
+                ch2,
+                forward,
+            } => cmd_local_set_alarm(port, ch1, ch2, forward).await,
+        },
         Commands::BleProvision {
             ssid,
             wifi_password,
@@ -224,55 +327,9 @@ async fn main() -> Result<()> {
             cmd_ble_provision(&ssid, &wifi_password, local_ip.as_deref(), local_port);
             Ok(())
         }
-        Commands::HaBridge {
-            token,
-            mac,
-            mqtt_host,
-            mqtt_port,
-            mqtt_user,
-            mqtt_pass,
-            device_name,
-            interval,
-        } => {
-            cmd_ha_bridge(
-                &token,
-                &mac,
-                &mqtt_host,
-                mqtt_port,
-                mqtt_user,
-                mqtt_pass,
-                &device_name,
-                interval,
-            )
-            .await
-        }
         Commands::Protocol => {
             cmd_protocol();
             Ok(())
-        }
-        Commands::Proxy {
-            port,
-            forward,
-            mqtt,
-            mac,
-            mqtt_host,
-            mqtt_port,
-            mqtt_user,
-            mqtt_pass,
-            device_name,
-        } => {
-            cmd_proxy(
-                port,
-                forward,
-                mqtt,
-                mac,
-                &mqtt_host,
-                mqtt_port,
-                mqtt_user,
-                mqtt_pass,
-                &device_name,
-            )
-            .await
         }
     }
 }
@@ -288,7 +345,7 @@ async fn cmd_login(email: &str, password: &str) -> Result<()> {
     println!("  Token:    {}", user.token);
     println!();
     println!("Use this token with other commands:");
-    println!("  grillsense devices --token {}", user.token);
+    println!("  grillsense cloud devices --token {}", user.token);
 
     Ok(())
 }
@@ -322,7 +379,7 @@ async fn cmd_devices(token: &str) -> Result<()> {
         println!();
         println!("Monitor this device:");
         println!(
-            "  grillsense monitor --token {} --mac {}",
+            "  grillsense cloud monitor --token {} --mac {}",
             token, devices[0].mac
         );
     }
@@ -330,7 +387,7 @@ async fn cmd_devices(token: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) -> Result<()> {
+async fn cmd_cloud_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
     client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
@@ -389,7 +446,7 @@ async fn cmd_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) ->
     }
 }
 
-async fn cmd_set_alarm(token: &str, mac: &str, temp: f64) -> Result<()> {
+async fn cmd_cloud_set_alarm(token: &str, mac: &str, temp: f64) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
     client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
@@ -409,7 +466,8 @@ async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
         println!("  Cloud device ID: {dev_id}");
         println!();
         println!("Monitor this device:");
-        println!("  grillsense monitor --mac {}", dev.mac);
+        println!("  grillsense cloud monitor --mac {}", dev.mac);
+        println!("  grillsense local monitor  (if device points here)");
     } else {
         println!("Scanning local network ({}s timeout)...", timeout_secs);
         let devices = lan::discover_broadcast(timeout_secs).await?;
@@ -429,7 +487,7 @@ async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
         println!();
         if devices.len() == 1 {
             println!("Monitor this device:");
-            println!("  grillsense monitor --mac {}", devices[0].mac);
+            println!("  grillsense cloud monitor --mac {}", devices[0].mac);
         }
     }
     Ok(())
@@ -508,7 +566,7 @@ fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, lo
     if local_ip.is_some() {
         println!("NOTE: Device will be configured to send data to {}:{}", 
             config.server_host, config.server_port);
-        println!("Run 'grillsense udp-listen' on that host to receive data.");
+        println!("Run 'grillsense local proxy' on that host to receive data.");
     } else {
         println!("NOTE: Device will be configured to send data to the cloud server.");
     }
@@ -517,7 +575,7 @@ fn cmd_ble_provision(ssid: &str, wifi_password: &str, local_ip: Option<&str>, lo
     println!("This is a dry-run showing the command sequence.");
 }
 
-async fn cmd_ha_bridge(
+async fn cmd_cloud_bridge(
     token: &str,
     mac: &str,
     mqtt_host: &str,
@@ -572,7 +630,7 @@ async fn cmd_proxy(
     println!("  MQTT:    {mqtt_enabled}");
     println!();
     println!("Configure device to send here:");
-    println!("  grillsense configure --ip <device-ip> --ssid <ssid> -P <pass> --server <this-ip> --server-port {port}");
+    println!("  grillsense local configure --ip <device-ip> --ssid <ssid> -P <pass> --server <this-ip> --server-port {port}");
     println!();
 
     let (packet_tx, mut packet_rx) = mpsc::channel::<udp::DevicePacket>(64);
@@ -625,6 +683,127 @@ async fn cmd_proxy(
         packet_tx: Some(packet_tx),
     })
     .await
+}
+
+async fn cmd_local_monitor(port: u16, fahrenheit: bool) -> Result<()> {
+    println!("GrillSense Local Monitor");
+    println!("========================");
+    println!("  Listen: 0.0.0.0:{port}");
+    println!("  Unit:   {}", if fahrenheit { "°F" } else { "°C" });
+    println!();
+    println!("Waiting for device packets...");
+    println!();
+
+    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
+        .await
+        .with_context(|| format!("Failed to bind UDP port {port}"))?;
+
+    let mut buf = [0u8; 256];
+    loop {
+        let (len, addr) = sock.recv_from(&mut buf).await?;
+        let data = &buf[..len];
+
+        if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+            let active = pkt.active_channels();
+            if active.is_empty() {
+                continue;
+            }
+            let temps: Vec<String> = active
+                .iter()
+                .map(|(ch, t)| {
+                    let val = if fahrenheit { *t * 9.0 / 5.0 + 32.0 } else { *t };
+                    let unit = if fahrenheit { "°F" } else { "°C" };
+                    format!("CH{ch}: {val:.1}{unit}")
+                })
+                .collect();
+            let ts = chrono_lite_now();
+            println!("[{ts}] {addr} — {}", temps.join(" | "));
+            io::stdout().flush().ok();
+        }
+    }
+}
+
+async fn cmd_local_set_alarm(
+    port: u16,
+    ch1_threshold: Option<f64>,
+    ch2_threshold: Option<f64>,
+    forward: bool,
+) -> Result<()> {
+    if ch1_threshold.is_none() && ch2_threshold.is_none() {
+        anyhow::bail!("At least one threshold required: --ch1 <temp> and/or --ch2 <temp>");
+    }
+
+    println!("GrillSense Local Alarm");
+    println!("======================");
+    if let Some(t) = ch1_threshold {
+        println!("  CH1 alarm: ≥ {t:.1}°C");
+    }
+    if let Some(t) = ch2_threshold {
+        println!("  CH2 alarm: ≥ {t:.1}°C");
+    }
+    println!("  Listen:    0.0.0.0:{port}");
+    println!("  Forward:   {forward}");
+    println!();
+
+    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
+        .await
+        .with_context(|| format!("Failed to bind UDP port {port}"))?;
+
+    let cloud_addr = if forward {
+        Some(udp::resolve_cloud_addr().await?)
+    } else {
+        None
+    };
+
+    let mut ch1_alarmed = false;
+    let mut ch2_alarmed = false;
+    let mut buf = [0u8; 256];
+
+    println!("Waiting for device packets...");
+    println!();
+
+    loop {
+        let (len, addr) = sock.recv_from(&mut buf).await?;
+        let data = &buf[..len];
+
+        // Forward to cloud if enabled
+        if let Some(ref cloud) = cloud_addr {
+            let _ = sock.send_to(data, cloud).await;
+        }
+
+        if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+            let active = pkt.active_channels();
+            let ts = chrono_lite_now();
+
+            for &(ch, temp) in &active {
+                let (threshold, alarmed) = match ch {
+                    1 => (ch1_threshold, &mut ch1_alarmed),
+                    2 => (ch2_threshold, &mut ch2_alarmed),
+                    _ => continue,
+                };
+
+                if let Some(limit) = threshold {
+                    if temp >= limit && !*alarmed {
+                        *alarmed = true;
+                        println!(
+                            "\x07[{ts}] *** ALARM *** CH{ch}: {temp:.1}°C ≥ {limit:.1}°C (from {addr})"
+                        );
+                    } else if temp < limit && *alarmed {
+                        *alarmed = false;
+                        println!(
+                            "[{ts}] [cleared] CH{ch}: {temp:.1}°C < {limit:.1}°C"
+                        );
+                    } else if !active.is_empty() {
+                        let status = if *alarmed { "ALARM" } else { "ok" };
+                        print!(
+                            "\r[{ts}] CH{ch}: {temp:.1}°C [{status}]  "
+                        );
+                        io::stdout().flush().ok();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// MQTT publisher that consumes device packets and publishes to HA.
