@@ -193,6 +193,27 @@ enum LocalCommands {
         /// Show temperature in Fahrenheit
         #[arg(short = 'F', long)]
         fahrenheit: bool,
+        /// Also publish to MQTT for Home Assistant
+        #[arg(long)]
+        mqtt: bool,
+        /// Device MAC address (for MQTT entity naming)
+        #[arg(short, long)]
+        mac: Option<String>,
+        /// MQTT broker host
+        #[arg(long, default_value = "localhost")]
+        mqtt_host: String,
+        /// MQTT broker port
+        #[arg(long, default_value = "1883")]
+        mqtt_port: u16,
+        /// MQTT username
+        #[arg(long)]
+        mqtt_user: Option<String>,
+        /// MQTT password
+        #[arg(long)]
+        mqtt_pass: Option<String>,
+        /// Device name in Home Assistant
+        #[arg(long, default_value = "BBQ Thermometer")]
+        device_name: String,
     },
 
     /// Set device alarm by sending the alarm packet directly via UDP.
@@ -284,8 +305,29 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            LocalCommands::Monitor { port, fahrenheit } => {
-                cmd_local_monitor(port, fahrenheit).await
+            LocalCommands::Monitor {
+                port,
+                fahrenheit,
+                mqtt,
+                mac,
+                mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                device_name,
+            } => {
+                cmd_local_monitor(
+                    port,
+                    fahrenheit,
+                    mqtt,
+                    mac,
+                    &mqtt_host,
+                    mqtt_port,
+                    mqtt_user,
+                    mqtt_pass,
+                    &device_name,
+                )
+                .await
             }
             LocalCommands::SetAlarm { port, ch1, ch2 } => cmd_local_set_alarm(port, ch1, ch2).await,
         },
@@ -611,18 +653,61 @@ async fn cmd_proxy(
     .await
 }
 
-async fn cmd_local_monitor(port: u16, fahrenheit: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn cmd_local_monitor(
+    port: u16,
+    fahrenheit: bool,
+    mqtt_enabled: bool,
+    mac: Option<String>,
+    mqtt_host: &str,
+    mqtt_port: u16,
+    mqtt_user: Option<String>,
+    mqtt_pass: Option<String>,
+    device_name: &str,
+) -> Result<()> {
     println!("GrillSense Local Monitor");
     println!("========================");
     println!("  Listen: 0.0.0.0:{port}");
     println!("  Unit:   {}", if fahrenheit { "°F" } else { "°C" });
-    println!();
-    println!("Waiting for device packets...");
+    println!("  MQTT:   {mqtt_enabled}");
     println!();
 
-    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
-        .await
-        .with_context(|| format!("Failed to bind UDP port {port}"))?;
+    let sock = std::sync::Arc::new(
+        tokio::net::UdpSocket::bind(("0.0.0.0", port))
+            .await
+            .with_context(|| format!("Failed to bind UDP port {port}"))?,
+    );
+
+    // Start MQTT publisher task if enabled
+    let mqtt_tx = if mqtt_enabled {
+        let mac_id = mac.clone().unwrap_or_else(|| "unknown".to_string());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<udp::DevicePacket>(64);
+        let mqtt_host = mqtt_host.to_string();
+        let mqtt_user = mqtt_user.clone();
+        let mqtt_pass = mqtt_pass.clone();
+        let device_name = device_name.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = mqtt_proxy_publisher(
+                &mut rx,
+                &mac_id,
+                &mqtt_host,
+                mqtt_port,
+                mqtt_user,
+                mqtt_pass,
+                &device_name,
+            )
+            .await
+            {
+                eprintln!("[mqtt] Publisher error: {e}");
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
+
+    println!("Waiting for device packets...");
+    println!();
 
     let mut buf = [0u8; 256];
     loop {
@@ -634,6 +719,27 @@ async fn cmd_local_monitor(port: u16, fahrenheit: bool) -> Result<()> {
             let _ = sock.send_to(&echo, addr).await;
         }
 
+        // Feed MQTT publisher
+        if let Some(ref tx) = mqtt_tx {
+            let parsed = if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
+                Some(udp::ParsedData::Temperature(pkt))
+            } else if let Some((ch, temp_c)) = protocol::udp::parse_alarm_packet(data) {
+                Some(udp::ParsedData::Alarm {
+                    channel: ch,
+                    temp_c,
+                })
+            } else {
+                None
+            };
+            let _ = tx.try_send(udp::DevicePacket {
+                source: addr,
+                _raw: data.to_vec(),
+                direction: udp::PacketDirection::DeviceToCloud,
+                parsed,
+            });
+        }
+
+        // Display temperature
         if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
             let active = pkt.active_channels();
             if active.is_empty() {

@@ -94,14 +94,20 @@ grillsense local discover
 grillsense cloud monitor --mac AA:BB:CC:44:55:66
 ```
 
-### Run the local proxy with MQTT
+### Run local-only with MQTT (no cloud)
 
 ```sh
 # 1. Reconfigure the device to point at your machine
 grillsense local configure --ip <device-ip> --ssid <ssid> -P <wifi-pass> \
     --server <your-ip>
 
-# 2. Start the proxy
+# 2. Start the local monitor with MQTT
+grillsense local monitor --mqtt --mqtt-host <broker-ip>
+```
+
+### Run the local proxy with MQTT (keeps cloud working)
+
+```sh
 grillsense local proxy --mqtt --mqtt-host <broker-ip>
 ```
 
@@ -128,7 +134,7 @@ sensors, connectivity status, and more).
 | `local info` | Query device firmware and config via AT commands |
 | `local configure` | Reconfigure WiFi and server settings |
 | `local proxy` | Bidirectional UDP proxy (+ optional MQTT) |
-| `local monitor` | Receive and display temperatures directly |
+| `local monitor` | Receive and display temperatures directly (+ optional MQTT) |
 | `local set-alarm` | Set the device buzzer alarm via UDP |
 
 ## Reconfigure the device
