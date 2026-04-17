@@ -45,4 +45,3 @@ The CLI (`main.rs`) is organized into `cloud` and `local` subcommand groups. Bot
 - All personal data (MAC addresses, IPs) in code and git history is anonymized. Cloud server addresses (`smartserver.emaxtime.cn`, `47.52.241.127`) are NOT anonymized.
 - The MQTT implementation is hand-rolled (no external MQTT crate) to keep dependencies minimal.
 - Modules that contain functions not yet called from `main.rs` use `#![allow(dead_code)]` at the module level.
-- The user does NOT have sudo access. Ask before suggesting commands that require elevated privileges.
