@@ -84,39 +84,24 @@ impl MqttHaConfig {
 
         let mut msgs = Vec::new();
 
-        // Channel 1 temperature sensor
-        let ch1_config = json!({
-            "name": format!("{} Probe 1", self.device_name),
-            "unique_id": format!("grillsense_{dev_id}_ch1"),
-            "state_topic": state_topic,
-            "value_template": "{{ value_json.temperature_ch1 }}",
-            "unit_of_measurement": "°C",
-            "device_class": "temperature",
-            "state_class": "measurement",
-            "availability_topic": avail_topic,
-            "device": device,
-        });
-        msgs.push((
-            self.discovery_topic("ch1"),
-            serde_json::to_string(&ch1_config).unwrap(),
-        ));
-
-        // Channel 2 temperature sensor
-        let ch2_config = json!({
-            "name": format!("{} Probe 2", self.device_name),
-            "unique_id": format!("grillsense_{dev_id}_ch2"),
-            "state_topic": state_topic,
-            "value_template": "{{ value_json.temperature_ch2 }}",
-            "unit_of_measurement": "°C",
-            "device_class": "temperature",
-            "state_class": "measurement",
-            "availability_topic": avail_topic,
-            "device": device,
-        });
-        msgs.push((
-            self.discovery_topic("ch2"),
-            serde_json::to_string(&ch2_config).unwrap(),
-        ));
+        // Temperature sensors for all 6 channels
+        for ch in 1..=6 {
+            let config = json!({
+                "name": format!("{} Probe {ch}", self.device_name),
+                "unique_id": format!("grillsense_{dev_id}_ch{ch}"),
+                "state_topic": state_topic,
+                "value_template": format!("{{{{ value_json.temperature_ch{ch} }}}}"),
+                "unit_of_measurement": "°C",
+                "device_class": "temperature",
+                "state_class": "measurement",
+                "availability_topic": avail_topic,
+                "device": device,
+            });
+            msgs.push((
+                self.discovery_topic(&format!("ch{ch}")),
+                serde_json::to_string(&config).unwrap(),
+            ));
+        }
 
         // Online status binary sensor
         let online_config = json!({
@@ -139,14 +124,16 @@ impl MqttHaConfig {
     /// Generate a state payload from temperature data.
     pub fn state_payload(
         &self,
-        ch1: f64,
-        ch2: f64,
-        is_online: bool,
+        temp: &crate::protocol::TempResult,
     ) -> String {
         serde_json::to_string(&json!({
-            "temperature_ch1": ch1,
-            "temperature_ch2": ch2,
-            "is_online": is_online,
+            "temperature_ch1": temp.temperature_ch1,
+            "temperature_ch2": temp.temperature_ch2,
+            "temperature_ch3": temp.temperature_ch3,
+            "temperature_ch4": temp.temperature_ch4,
+            "temperature_ch5": temp.temperature_ch5,
+            "temperature_ch6": temp.temperature_ch6,
+            "is_online": temp.online(),
         }))
         .unwrap()
     }
@@ -189,7 +176,7 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
         let packet = build_mqtt_publish(&topic, payload.as_bytes(), true);
         stream.write_all(&packet).await?;
     }
-    println!("Published HA discovery config for 3 entities");
+    println!("Published HA discovery config for 7 entities (6 probes + online)");
 
     // Publish online availability
     let avail_packet =
@@ -205,14 +192,13 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
     loop {
         match client.get_temperature().await {
             Ok(temp) => {
-                let payload =
-                    config.state_payload(temp.temperature_ch1, temp.temperature_ch2, temp.is_online);
+                let payload = config.state_payload(&temp);
                 let packet =
                     build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
                 stream.write_all(&packet).await?;
 
                 // Also update availability
-                let status = if temp.is_online { "online" } else { "offline" };
+                let status = if temp.online() { "online" } else { "offline" };
                 let avail = build_mqtt_publish(
                     &config.availability_topic(),
                     status.as_bytes(),
@@ -363,7 +349,7 @@ mod tests {
         };
 
         let msgs = config.discovery_messages();
-        assert_eq!(msgs.len(), 3); // ch1, ch2, online
+        assert_eq!(msgs.len(), 7); // ch1-6 + online
 
         // Check ch1 discovery
         let (topic, payload) = &msgs[0];
@@ -374,7 +360,7 @@ mod tests {
         assert_eq!(v["device_class"], "temperature");
 
         // Check online binary sensor
-        let (topic, _) = &msgs[2];
+        let (topic, _) = &msgs[6];
         assert!(topic.contains("binary_sensor"));
     }
 
@@ -390,7 +376,18 @@ mod tests {
             poll_interval: Duration::from_secs(3),
         };
 
-        let payload = config.state_payload(72.5, 0.0, true);
+        let temp = crate::protocol::TempResult {
+            is_online: false,
+            isonline: true,
+            time: String::new(),
+            temperature_ch1: 72.5,
+            temperature_ch2: 0.0,
+            temperature_ch3: 0.0,
+            temperature_ch4: 0.0,
+            temperature_ch5: 0.0,
+            temperature_ch6: 0.0,
+        };
+        let payload = config.state_payload(&temp);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["temperature_ch1"], 72.5);
         assert_eq!(v["temperature_ch2"], 0.0);

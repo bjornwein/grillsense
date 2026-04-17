@@ -38,12 +38,12 @@ enum Commands {
 
     /// Monitor temperature readings in real-time
     Monitor {
-        /// Auth token (from login)
-        #[arg(short, long)]
-        token: String,
-        /// Device MAC address
+        /// Device MAC address (WiFi MAC from 'discover' command)
         #[arg(short, long)]
         mac: String,
+        /// Auth token (optional — not needed for temperature reads)
+        #[arg(short, long, default_value = "")]
+        token: String,
         /// Polling interval in seconds
         #[arg(short, long, default_value = "3")]
         interval: u64,
@@ -280,10 +280,11 @@ async fn cmd_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) ->
     client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
 
+    let unit_label = if fahrenheit { "°F" } else { "°C" };
+    let dev_id = client.device_mac().unwrap_or(mac);
     println!(
-        "Monitoring device {} ({}), Ctrl+C to stop...",
-        mac,
-        if fahrenheit { "°F" } else { "°C" }
+        "Monitoring device {} (cloud ID: {}, {}), Ctrl+C to stop...",
+        mac, dev_id, unit_label
     );
     println!();
 
@@ -294,24 +295,28 @@ async fn cmd_monitor(token: &str, mac: &str, interval: u64, fahrenheit: bool) ->
         match client.get_temperature().await {
             Ok(temp) => {
                 consecutive_errors = 0;
-                let (ch1, ch2, unit) = if fahrenheit {
-                    (
-                        protocol::celsius_to_fahrenheit(temp.temperature_ch1),
-                        protocol::celsius_to_fahrenheit(temp.temperature_ch2),
-                        "°F",
-                    )
-                } else {
-                    (temp.temperature_ch1, temp.temperature_ch2, "°C")
-                };
-
-                let online = if temp.is_online { "online" } else { "OFFLINE" };
+                let online = if temp.online() { "online" } else { "OFFLINE" };
                 let now = chrono_lite_now();
 
-                // Use \r to overwrite the line for a clean live display
-                print!(
-                    "\r[{}] {} | CH1: {:6.1}{} | CH2: {:6.1}{}    ",
-                    now, online, ch1, unit, ch2, unit,
-                );
+                let active = temp.active_channels();
+                let channels: String = if active.is_empty() {
+                    "no probes connected".to_string()
+                } else {
+                    active
+                        .iter()
+                        .map(|(ch, t)| {
+                            let v = if fahrenheit {
+                                protocol::celsius_to_fahrenheit(*t)
+                            } else {
+                                *t
+                            };
+                            format!("CH{ch}: {v:.1}{unit_label}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+
+                print!("\r[{now}] {online} | {channels}    ");
                 io::stdout().flush().context("flush stdout")?;
             }
             Err(e) => {
@@ -344,7 +349,12 @@ async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
     if let Some(ip) = ip {
         println!("Probing {ip}...");
         let dev = lan::discover_unicast(ip).await?;
+        let dev_id = protocol::wifi_mac_to_device_id(&dev.mac);
         println!("Found: {} ({}) at {}", dev.model, dev.mac, dev.ip);
+        println!("  Cloud device ID: {dev_id}");
+        println!();
+        println!("Monitor this device:");
+        println!("  grillsense monitor --mac {}", dev.mac);
     } else {
         println!("Scanning local network ({}s timeout)...", timeout_secs);
         let devices = lan::discover_broadcast(timeout_secs).await?;
@@ -353,17 +363,18 @@ async fn cmd_discover(ip: Option<&str>, timeout_secs: u64) -> Result<()> {
             return Ok(());
         }
         println!(
-            "{:<16} {:<14} {:<12}",
-            "IP", "MAC", "Model"
+            "{:<16} {:<14} {:<12} {:<12}",
+            "IP", "MAC", "Model", "Cloud ID"
         );
-        println!("{}", "-".repeat(44));
+        println!("{}", "-".repeat(56));
         for dev in &devices {
-            println!("{:<16} {:<14} {:<12}", dev.ip, dev.mac, dev.model);
+            let dev_id = protocol::wifi_mac_to_device_id(&dev.mac);
+            println!("{:<16} {:<14} {:<12} {:<12}", dev.ip, dev.mac, dev.model, dev_id);
         }
         println!();
         if devices.len() == 1 {
-            println!("Query this device:");
-            println!("  grillsense device-info --ip {}", devices[0].ip);
+            println!("Monitor this device:");
+            println!("  grillsense monitor --mac {}", devices[0].mac);
         }
     }
     Ok(())

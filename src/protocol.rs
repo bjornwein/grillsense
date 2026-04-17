@@ -89,9 +89,72 @@ use serde::Deserialize;
 /// Temperature reading from the cloud API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TempResult {
+    #[serde(default)]
     pub is_online: bool,
+    #[serde(rename = "isonline", default)]
+    pub isonline: bool,
+    #[serde(default)]
+    pub time: String,
+    #[serde(default)]
     pub temperature_ch1: f64,
+    #[serde(default)]
     pub temperature_ch2: f64,
+    #[serde(default)]
+    pub temperature_ch3: f64,
+    #[serde(default)]
+    pub temperature_ch4: f64,
+    #[serde(default)]
+    pub temperature_ch5: f64,
+    #[serde(default)]
+    pub temperature_ch6: f64,
+}
+
+impl TempResult {
+    /// Check if device is online (handles both field names).
+    pub fn online(&self) -> bool {
+        self.is_online || self.isonline
+    }
+
+    /// Get all channel temperatures as an array.
+    pub fn channels(&self) -> [f64; 6] {
+        [
+            self.temperature_ch1,
+            self.temperature_ch2,
+            self.temperature_ch3,
+            self.temperature_ch4,
+            self.temperature_ch5,
+            self.temperature_ch6,
+        ]
+    }
+
+    /// Get channel temperatures that have probes connected (non-zero).
+    pub fn active_channels(&self) -> Vec<(usize, f64)> {
+        self.channels()
+            .iter()
+            .enumerate()
+            .filter(|&(_, t)| *t != 0.0)
+            .map(|(i, &t)| (i + 1, t))
+            .collect()
+    }
+}
+
+/// Derive the cloud device ID from a WiFi MAC address.
+///
+/// The app transforms the WiFi MAC by removing the first 2 bytes (4 hex chars)
+/// and prepending "02". For example:
+///   WiFi MAC: AABBCC445566 → Device ID: 02CC445566
+///
+/// This is confirmed to work with the cloud API for G002 (HF-LPT230) devices.
+pub fn wifi_mac_to_device_id(wifi_mac: &str) -> String {
+    let stripped = wifi_mac
+        .replace([':', '-'], "")
+        .to_uppercase();
+    if stripped.len() >= 12 {
+        format!("02{}", &stripped[4..])
+    } else {
+        // Fallback: return as-is if MAC is too short
+        stripped
+    }
 }
 
 /// Device info from the cloud API.
@@ -243,5 +306,36 @@ mod tests {
         assert_eq!(celsius_to_fahrenheit(0.0), 32.0);
         assert_eq!(fahrenheit_to_celsius(212.0), 100.0);
         assert_eq!(fahrenheit_to_celsius(32.0), 0.0);
+    }
+
+    #[test]
+    fn test_wifi_mac_to_device_id() {
+        // Real-world example: WiFi MAC AABBCC445566 → device ID 02CC445566
+        assert_eq!(wifi_mac_to_device_id("AABBCC445566"), "02CC445566");
+        // With colons
+        assert_eq!(wifi_mac_to_device_id("AA:BB:CC:44:55:66"), "02CC445566");
+        // Lowercase
+        assert_eq!(wifi_mac_to_device_id("aabbcc445566"), "02CC445566");
+        // With hyphens
+        assert_eq!(wifi_mac_to_device_id("AA-BB-CC-44-55-66"), "02CC445566");
+    }
+
+    #[test]
+    fn test_active_channels() {
+        let temp = TempResult {
+            is_online: false,
+            isonline: true,
+            time: String::new(),
+            temperature_ch1: 21.6,
+            temperature_ch2: 0.0,
+            temperature_ch3: 0.0,
+            temperature_ch4: 0.0,
+            temperature_ch5: 0.0,
+            temperature_ch6: 0.0,
+        };
+        assert!(temp.online());
+        let active = temp.active_channels();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0], (1, 21.6));
     }
 }

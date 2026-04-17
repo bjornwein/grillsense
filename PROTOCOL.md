@@ -284,15 +284,40 @@ Response: {} (success) or { "result": <error_code> }
 
 ### Temperature Data
 
+#### Device ID Derivation (Critical)
+
+The `devmac` parameter in API calls is **NOT** the WiFi MAC address. It is a
+derived identifier computed from the WiFi MAC:
+
+```
+WiFi MAC:     AABBCC445566
+              ^^^^          ← Remove first 4 hex chars (first 2 bytes)
+Remaining:        CC445566
+Prepend "02": 02CC445566   ← This is the device ID
+```
+
+**Formula**: `devmac = "02" + wifi_mac[4:]`
+
+This transformation matches the app's BLE provisioning flow in
+`APconnectPresenterImp.setDeviceMac()`.
+
+**No authentication token is required** for temperature queries — only the
+device ID.
+
 #### Get Temperature
 ```
-GET /V1.0/thermo/temperature?devmac=<mac>
+GET /V1.0/thermo/temperature?devmac=02CC445566
 
 Response:
 {
-    "is_online": true,
-    "temperature_ch1": 72.5,
-    "temperature_ch2": 0.0
+    "isonline": true,
+    "time": "2026-04-17T23:49:21.010199287+08:00",
+    "temperature_ch1": 21.6,
+    "temperature_ch2": 0,
+    "temperature_ch3": 0,
+    "temperature_ch4": 0,
+    "temperature_ch5": 0,
+    "temperature_ch6": 0
 }
 
 Error Response:
@@ -302,10 +327,11 @@ Error Response:
 }
 ```
 
-- `temperature_ch1`: Probe 1 temperature in **Celsius**
-- `temperature_ch2`: Probe 2 temperature in **Celsius**
-- `is_online`: Whether the device is currently connected
-- Values of `0.0` typically mean no probe connected
+- **6 temperature channels** (not 2 as originally assumed)
+- `temperature_chN`: Probe N temperature in **Celsius**
+- `isonline`: Whether the device is currently connected
+- `time`: Server timestamp (CST/UTC+8)
+- Values of `0` mean no probe connected
 
 **Known error codes:**
 
