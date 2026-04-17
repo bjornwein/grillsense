@@ -22,7 +22,7 @@ use crate::protocol;
 /// Parsed data from a device packet.
 #[derive(Debug, Clone)]
 pub struct DevicePacket {
-    pub _source: SocketAddr,
+    pub source: SocketAddr,
     pub _raw: Vec<u8>,
     pub direction: PacketDirection,
     pub parsed: Option<ParsedData>,
@@ -46,6 +46,7 @@ impl std::fmt::Display for PacketDirection {
 #[derive(Debug, Clone)]
 pub enum ParsedData {
     Temperature(protocol::udp::TempPacket),
+    Alarm { channel: u8, temp_c: f64 },
     Csv(Vec<String>),
     Unknown,
 }
@@ -113,7 +114,7 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 // Send to consumer (MQTT, etc.)
                 if let Some(ref tx) = config.packet_tx {
                     let pkt = DevicePacket {
-                        _source: src,
+                        source: src,
                         _raw: data.to_vec(),
                         direction: PacketDirection::DeviceToCloud,
                         parsed: parsed.clone(),
@@ -139,7 +140,7 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                 // Send to consumer
                 if let Some(ref tx) = config.packet_tx {
                     let pkt = DevicePacket {
-                        _source: src,
+                        source: src,
                         _raw: data.to_vec(),
                         direction: PacketDirection::CloudToDevice,
                         parsed: try_parse(data),
@@ -195,6 +196,9 @@ fn print_packet(
                 println!("  >> Temp: {temps} (device {})", pkt.device_id);
             }
         }
+        Some(ParsedData::Alarm { channel, temp_c }) => {
+            println!("  >> Alarm: CH{channel} = {temp_c:.1}°C");
+        }
         Some(ParsedData::Csv(parts)) => {
             println!("  >> CSV: {}", parts.join(", "));
         }
@@ -211,6 +215,11 @@ fn try_parse(data: &[u8]) -> Option<ParsedData> {
     // Try the known binary temperature packet format first
     if let Some(pkt) = protocol::udp::TempPacket::parse(data) {
         return Some(ParsedData::Temperature(pkt));
+    }
+
+    // Try alarm packet format (16 bytes)
+    if let Some((channel, temp_c)) = protocol::udp::parse_alarm_packet(data) {
+        return Some(ParsedData::Alarm { channel, temp_c });
     }
 
     // Fallback: try text-based formats for unknown packet types

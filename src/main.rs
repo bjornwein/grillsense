@@ -857,7 +857,8 @@ fn build_echo(data: &[u8]) -> Option<Vec<u8>> {
     Some(echo)
 }
 
-/// MQTT publisher that consumes device packets and publishes to HA.
+/// MQTT publisher that consumes device packets, publishes to HA,
+/// and subscribes to alarm command topics to send alarm packets to the device.
 async fn mqtt_proxy_publisher(
     rx: &mut tokio::sync::mpsc::Receiver<udp::DevicePacket>,
     device_id: &str,
@@ -875,12 +876,22 @@ async fn mqtt_proxy_publisher(
         .await
         .with_context(|| format!("Failed to connect to MQTT broker at {addr}"))?;
 
-    // MQTT CONNECT
+    // MQTT CONNECT with LWT for availability
+    let config = mqtt::MqttHaConfig {
+        broker_host: mqtt_host.to_string(),
+        broker_port: mqtt_port,
+        username: mqtt_user.clone(),
+        password: mqtt_pass.clone(),
+        device_name: device_name.to_string(),
+        device_id: device_id.to_string(),
+        poll_interval: Duration::from_secs(1),
+    };
+
     let connect = mqtt::build_mqtt_connect(
         &format!("grillsense_proxy_{device_id}"),
         mqtt_user.as_deref(),
         mqtt_pass.as_deref(),
-        None,
+        Some((&config.availability_topic(), "offline")),
     );
     stream.write_all(&connect).await?;
 
@@ -892,44 +903,152 @@ async fn mqtt_proxy_publisher(
 
     println!("[mqtt] Connected to {addr}");
 
-    // Publish HA discovery for 6 channels
-    let config = mqtt::MqttHaConfig {
-        broker_host: mqtt_host.to_string(),
-        broker_port: mqtt_port,
-        username: mqtt_user,
-        password: mqtt_pass,
-        device_name: device_name.to_string(),
-        device_id: device_id.to_string(),
-        poll_interval: Duration::from_secs(1), // unused in proxy mode
-    };
-
-    for (topic, payload) in config.discovery_messages() {
-        let packet = mqtt::build_mqtt_publish(&topic, payload.as_bytes(), true);
+    // Publish HA discovery (6 probes + online + 2 alarm number entities)
+    let discovery_msgs = config.discovery_messages();
+    let entity_count = discovery_msgs.len();
+    for (topic, payload) in &discovery_msgs {
+        let packet = mqtt::build_mqtt_publish(topic, payload.as_bytes(), true);
         stream.write_all(&packet).await?;
     }
-    println!("[mqtt] Published HA discovery for 7 entities");
+    println!("[mqtt] Published HA discovery for {entity_count} entities");
 
     // Mark online
     let avail = mqtt::build_mqtt_publish(&config.availability_topic(), b"online", true);
     stream.write_all(&avail).await?;
 
-    // Process incoming device packets
-    while let Some(pkt) = rx.recv().await {
-        if pkt.direction != udp::PacketDirection::DeviceToCloud {
-            continue;
+    // Subscribe to alarm command topics
+    let alarm_ch1_topic = config.alarm_command_topic(1);
+    let alarm_ch2_topic = config.alarm_command_topic(2);
+    let subscribe =
+        mqtt::build_mqtt_subscribe(&[alarm_ch1_topic.as_str(), alarm_ch2_topic.as_str()], 1);
+    stream.write_all(&subscribe).await?;
+    println!("[mqtt] Subscribed to alarm commands: {alarm_ch1_topic}, {alarm_ch2_topic}");
+
+    // UDP socket for sending alarm packets to the device
+    let alarm_sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let mut device_addr: Option<std::net::SocketAddr> = None;
+    let mut device_id_bytes: Option<[u8; 5]> = None;
+
+    // Track current alarm setpoints for state publishing
+    let mut alarm_ch1: f64 = 0.0;
+    let mut alarm_ch2: f64 = 0.0;
+
+    // Split TCP stream for concurrent read/write
+    let (reader, mut writer) = stream.into_split();
+    let reader = std::sync::Arc::new(tokio::sync::Mutex::new(reader));
+
+    // Spawn a task to read from MQTT broker (alarm commands, PINGRESP, SUBACK)
+    let (mqtt_cmd_tx, mut mqtt_cmd_rx) = tokio::sync::mpsc::channel::<(u8, f64)>(16);
+    let mqtt_reader = reader.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let mut partial = Vec::new();
+        let mut reader = mqtt_reader.lock().await;
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break, // connection closed
+                Ok(n) => {
+                    partial.extend_from_slice(&buf[..n]);
+                    // Process complete packets from the buffer
+                    while let Some(pkt_len) = mqtt::mqtt_packet_len(&partial) {
+                        if partial.len() < pkt_len {
+                            break; // need more data
+                        }
+                        let pkt_data: Vec<u8> = partial.drain(..pkt_len).collect();
+                        if let Some((topic, payload, _)) = mqtt::parse_incoming_publish(&pkt_data)
+                            && let Ok(text) = std::str::from_utf8(&payload)
+                            && let Ok(temp) = text.trim().parse::<f64>()
+                        {
+                            let channel = if topic.contains("alarm_ch2") { 2 } else { 1 };
+                            let _ = mqtt_cmd_tx.try_send((channel, temp));
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
         }
-        if let Some(udp::ParsedData::Temperature(ref temp_pkt)) = pkt.parsed {
-            // Convert to TempResult for the existing MQTT state format
-            let temp_result = temp_pkt.to_temp_result();
-            let payload = config.state_payload(&temp_result);
+    });
 
-            let packet = mqtt::build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
-            stream.write_all(&packet).await?;
+    // Main loop: process device packets and MQTT alarm commands
+    loop {
+        tokio::select! {
+            pkt = rx.recv() => {
+                let Some(pkt) = pkt else { break };
 
-            // Keepalive
-            stream.write_all(&[0xC0, 0x00]).await?;
-            let mut resp = [0u8; 64];
-            let _ = tokio::time::timeout(Duration::from_millis(50), stream.read(&mut resp)).await;
+                // Learn device address from incoming packets
+                if pkt.direction == udp::PacketDirection::DeviceToCloud {
+                    device_addr = Some(pkt.source);
+
+                    // Learn device ID bytes from first temp packet
+                    if device_id_bytes.is_none()
+                        && let Some(udp::ParsedData::Temperature(ref temp_pkt)) = pkt.parsed
+                            && let Some(id) = protocol::udp::parse_device_id_bytes(&temp_pkt.raw) {
+                                device_id_bytes = Some(id);
+                            }
+                }
+
+                // Track alarm setpoints from cloud→device alarm packets
+                if let Some(udp::ParsedData::Alarm { channel, temp_c }) = &pkt.parsed {
+                    match channel {
+                        1 => alarm_ch1 = *temp_c,
+                        2 => alarm_ch2 = *temp_c,
+                        _ => {}
+                    }
+                    println!("[mqtt] Alarm CH{channel} updated to {temp_c:.1}°C (from cloud)");
+                }
+
+                if pkt.direction != udp::PacketDirection::DeviceToCloud {
+                    continue;
+                }
+
+                if let Some(udp::ParsedData::Temperature(ref temp_pkt)) = pkt.parsed {
+                    let temp_result = temp_pkt.to_temp_result();
+                    let state = serde_json::to_string(&serde_json::json!({
+                        "temperature_ch1": temp_result.temperature_ch1,
+                        "temperature_ch2": temp_result.temperature_ch2,
+                        "temperature_ch3": temp_result.temperature_ch3,
+                        "temperature_ch4": temp_result.temperature_ch4,
+                        "temperature_ch5": temp_result.temperature_ch5,
+                        "temperature_ch6": temp_result.temperature_ch6,
+                        "is_online": temp_result.online(),
+                        "alarm_ch1": alarm_ch1,
+                        "alarm_ch2": alarm_ch2,
+                    })).unwrap();
+
+                    let packet = mqtt::build_mqtt_publish(
+                        &config.state_topic(), state.as_bytes(), false,
+                    );
+                    writer.write_all(&packet).await?;
+
+                    // Keepalive
+                    writer.write_all(&[0xC0, 0x00]).await?;
+                }
+            }
+
+            cmd = mqtt_cmd_rx.recv() => {
+                let Some((channel, temp_c)) = cmd else { break };
+
+                println!("[mqtt] Alarm command received: CH{channel} = {temp_c:.1}°C");
+
+                if let (Some(addr), Some(id_bytes)) = (device_addr, device_id_bytes) {
+                    let alarm_pkt = protocol::udp::build_alarm_packet(
+                        &id_bytes, channel, temp_c,
+                    );
+                    match alarm_sock.send_to(&alarm_pkt, addr).await {
+                        Ok(_) => {
+                            println!("[mqtt] Sent alarm CH{channel}={temp_c:.1}°C to {addr}");
+                            match channel {
+                                1 => alarm_ch1 = temp_c,
+                                2 => alarm_ch2 = temp_c,
+                                _ => {}
+                            }
+                        }
+                        Err(e) => eprintln!("[mqtt] Failed to send alarm to device: {e}"),
+                    }
+                } else {
+                    eprintln!("[mqtt] Cannot send alarm: device address not yet learned");
+                }
+            }
         }
     }
 

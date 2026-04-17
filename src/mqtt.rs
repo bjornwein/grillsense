@@ -62,6 +62,25 @@ impl MqttHaConfig {
         )
     }
 
+    /// Alarm command topic for a channel (HA sends set commands here).
+    pub fn alarm_command_topic(&self, channel: u8) -> String {
+        format!(
+            "grillsense/{}/alarm_ch{}/set",
+            sanitize_id(&self.device_id),
+            channel
+        )
+    }
+
+    /// HA discovery topic for a number entity.
+    fn number_discovery_topic(&self, object_id: &str) -> String {
+        format!(
+            "{}/number/grillsense_{}/{}/config",
+            HA_DISCOVERY_PREFIX,
+            sanitize_id(&self.device_id),
+            object_id
+        )
+    }
+
     /// Generate the HA device info block for discovery payloads.
     fn device_info(&self) -> serde_json::Value {
         json!({
@@ -117,6 +136,28 @@ impl MqttHaConfig {
             self.binary_discovery_topic("online"),
             serde_json::to_string(&online_config).unwrap(),
         ));
+
+        // Alarm setpoint number entities for channels 1 and 2
+        for ch in 1..=2 {
+            let alarm_config = json!({
+                "name": format!("{} Alarm CH{ch}", self.device_name),
+                "unique_id": format!("grillsense_{dev_id}_alarm_ch{ch}"),
+                "command_topic": self.alarm_command_topic(ch),
+                "state_topic": state_topic,
+                "value_template": format!("{{{{ value_json.alarm_ch{ch} }}}}"),
+                "unit_of_measurement": "°C",
+                "min": 0,
+                "max": 300,
+                "step": 0.5,
+                "mode": "box",
+                "availability_topic": avail_topic,
+                "device": device,
+            });
+            msgs.push((
+                self.number_discovery_topic(&format!("alarm_ch{ch}")),
+                serde_json::to_string(&alarm_config).unwrap(),
+            ));
+        }
 
         msgs
     }
@@ -286,6 +327,90 @@ pub fn build_mqtt_publish(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> 
     packet
 }
 
+/// Build a minimal MQTT SUBSCRIBE packet.
+///
+/// Subscribes to a list of topic filters at QoS 0.
+pub fn build_mqtt_subscribe(topics: &[&str], packet_id: u16) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for topic in topics {
+        mqtt_write_string(&mut payload, topic);
+        payload.push(0x00); // QoS 0
+    }
+
+    let mut packet = Vec::new();
+    packet.push(0x82); // SUBSCRIBE (0x80 | 0x02 for required reserved bits)
+    let remaining = 2 + payload.len(); // 2 bytes for packet ID
+    mqtt_encode_remaining_length(&mut packet, remaining);
+    packet.push((packet_id >> 8) as u8);
+    packet.push((packet_id & 0xFF) as u8);
+    packet.extend(payload);
+    packet
+}
+
+/// Decode the remaining length from an MQTT packet stream.
+///
+/// Returns (length, bytes_consumed) or None if incomplete.
+fn mqtt_decode_remaining_length(data: &[u8]) -> Option<(usize, usize)> {
+    let mut multiplier = 1usize;
+    let mut value = 0usize;
+    for (i, &byte) in data.iter().enumerate() {
+        value += (byte & 0x7F) as usize * multiplier;
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+        multiplier *= 128;
+        if multiplier > 128 * 128 * 128 {
+            return None; // malformed
+        }
+    }
+    None // incomplete
+}
+
+/// Parse an incoming MQTT PUBLISH packet from a byte buffer.
+///
+/// Returns `Some((topic, payload, total_bytes_consumed))` for PUBLISH packets,
+/// or `None` for other packet types (PINGRESP, SUBACK, etc.) which are skipped.
+pub fn parse_incoming_publish(data: &[u8]) -> Option<(String, Vec<u8>, usize)> {
+    if data.is_empty() {
+        return None;
+    }
+    let packet_type = data[0] & 0xF0;
+    if packet_type != 0x30 {
+        // Not a PUBLISH — skip the packet
+        return None;
+    }
+
+    let (remaining_len, rl_bytes) = mqtt_decode_remaining_length(&data[1..])?;
+    let header_len = 1 + rl_bytes;
+    if data.len() < header_len + remaining_len {
+        return None; // incomplete packet
+    }
+
+    let body = &data[header_len..header_len + remaining_len];
+    if body.len() < 2 {
+        return None;
+    }
+    let topic_len = ((body[0] as usize) << 8) | body[1] as usize;
+    if body.len() < 2 + topic_len {
+        return None;
+    }
+    let topic = String::from_utf8_lossy(&body[2..2 + topic_len]).to_string();
+    let payload = body[2 + topic_len..].to_vec();
+    let total = header_len + remaining_len;
+    Some((topic, payload, total))
+}
+
+/// Calculate total packet length from an MQTT packet header.
+///
+/// Returns `Some(total_bytes)` or `None` if the remaining length is incomplete.
+pub fn mqtt_packet_len(data: &[u8]) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let (remaining_len, rl_bytes) = mqtt_decode_remaining_length(&data[1..])?;
+    Some(1 + rl_bytes + remaining_len)
+}
+
 fn mqtt_write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     buf.push((bytes.len() >> 8) as u8);
@@ -337,7 +462,7 @@ mod tests {
         };
 
         let msgs = config.discovery_messages();
-        assert_eq!(msgs.len(), 7); // ch1-6 + online
+        assert_eq!(msgs.len(), 9); // ch1-6 + online + alarm_ch1 + alarm_ch2
 
         // Check ch1 discovery
         let (topic, payload) = &msgs[0];
@@ -350,6 +475,20 @@ mod tests {
         // Check online binary sensor
         let (topic, _) = &msgs[6];
         assert!(topic.contains("binary_sensor"));
+
+        // Check alarm number entities
+        let (topic, payload) = &msgs[7];
+        assert!(topic.contains("number/"));
+        assert!(topic.contains("alarm_ch1"));
+        let v: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert!(
+            v["command_topic"]
+                .as_str()
+                .unwrap()
+                .contains("alarm_ch1/set")
+        );
+        assert_eq!(v["min"], 0);
+        assert_eq!(v["max"], 300);
     }
 
     #[test]
@@ -416,5 +555,46 @@ mod tests {
         buf.clear();
         mqtt_encode_remaining_length(&mut buf, 128);
         assert_eq!(buf, vec![0x80, 0x01]);
+    }
+
+    #[test]
+    fn test_mqtt_subscribe_packet() {
+        let packet = build_mqtt_subscribe(&["test/topic"], 1);
+        assert_eq!(packet[0], 0x82); // SUBSCRIBE type
+        assert_eq!(packet[2], 0x00); // packet ID MSB
+        assert_eq!(packet[3], 0x01); // packet ID LSB
+        // topic "test/topic" length
+        assert_eq!(packet[4], 0x00);
+        assert_eq!(packet[5], 10);
+        // QoS 0 at the end
+        assert_eq!(packet[packet.len() - 1], 0x00);
+    }
+
+    #[test]
+    fn test_parse_incoming_publish() {
+        // Build a PUBLISH packet and parse it back
+        let packet = build_mqtt_publish("alarm/set", b"75.5", false);
+        let result = parse_incoming_publish(&packet);
+        assert!(result.is_some());
+        let (topic, payload, len) = result.unwrap();
+        assert_eq!(topic, "alarm/set");
+        assert_eq!(payload, b"75.5");
+        assert_eq!(len, packet.len());
+    }
+
+    #[test]
+    fn test_parse_incoming_non_publish() {
+        // PINGRESP packet (0xD0)
+        let pingresp = vec![0xD0, 0x00];
+        assert!(parse_incoming_publish(&pingresp).is_none());
+    }
+
+    #[test]
+    fn test_mqtt_packet_len() {
+        let packet = build_mqtt_publish("t", b"hello", false);
+        assert_eq!(mqtt_packet_len(&packet), Some(packet.len()));
+
+        // Empty buffer
+        assert_eq!(mqtt_packet_len(&[]), None);
     }
 }
