@@ -1,0 +1,40 @@
+{
+  "configuration": {
+    "mode": {
+      "name": "Operating mode",
+      "description": "Local: receive UDP directly from device. Cloud: poll the GrillSense cloud API."
+    },
+    "udp_port": {
+      "name": "UDP port",
+      "description": "Port the thermometer sends data to (default 17000). Only used in local mode."
+    },
+    "device_name": {
+      "name": "Device name",
+      "description": "Name shown in Home Assistant for this thermometer."
+    },
+    "cloud_email": {
+      "name": "Cloud email",
+      "description": "GrillSense account email. Only needed in cloud mode."
+    },
+    "cloud_password": {
+      "name": "Cloud password",
+      "description": "GrillSense account password. Only needed in cloud mode."
+    },
+    "mqtt_host": {
+      "name": "MQTT host (override)",
+      "description": "Leave empty to auto-detect from the Mosquitto add-on."
+    },
+    "mqtt_port": {
+      "name": "MQTT port (override)",
+      "description": "Leave at 1883 unless your broker uses a different port."
+    },
+    "mqtt_user": {
+      "name": "MQTT username (override)",
+      "description": "Leave empty to auto-detect from the Mosquitto add-on."
+    },
+    "mqtt_pass": {
+      "name": "MQTT password (override)",
+      "description": "Leave empty to auto-detect from the Mosquitto add-on."
+    }
+  }
+}

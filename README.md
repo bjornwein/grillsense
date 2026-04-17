@@ -167,6 +167,49 @@ The full reverse-engineered protocol is documented in
 - Device ID derivation (`devmac = "02" + wifi_mac[4:]`)
 - Checksum algorithm
 
+## Home Assistant add-on
+
+The easiest way to run GrillSense on a Home Assistant OS / Supervised
+install is as a local add-on.
+
+### Install
+
+1. Clone or copy this repository to `/addons/grillsense/` on your HA host
+   (accessible via the Samba or SSH add-ons):
+
+   ```sh
+   cd /addons
+   git clone https://github.com/user/grillsense.git
+   ```
+
+2. In Home Assistant go to **Settings → Add-ons → Add-on Store** and
+   click the ⟳ button (top-right). "GrillSense Thermometer" should
+   appear under **Local add-ons**.
+
+3. Click it, then **Install**. The first build takes a few minutes
+   (compiles Rust from source).
+
+4. On the **Configuration** tab choose your operating mode:
+
+   | Option | Description |
+   |--------|-------------|
+   | `mode` | `local` (device sends UDP directly) or `cloud` (poll vendor API) |
+   | `udp_port` | UDP port the device targets (default `17000`, local mode only) |
+   | `device_name` | Name shown in Home Assistant |
+   | `cloud_email` / `cloud_password` | Vendor account (cloud mode only) |
+
+   MQTT credentials are auto-detected from the Mosquitto add-on.
+   Override with `mqtt_host` / `mqtt_user` / `mqtt_pass` if needed.
+
+5. **Start** the add-on. Temperature entities appear automatically via
+   MQTT discovery.
+
+### What gets created in HA
+
+- **6 temperature sensors** (CH1–CH6)
+- **1 binary sensor** (device online/offline)
+- **2 number entities** (alarm setpoint CH1/CH2, 0–300 °C)
+
 ## Hardware
 
 - **Thermometer**: Dangrill / GrillSense / Ezon WiFi BBQ (2-channel)
