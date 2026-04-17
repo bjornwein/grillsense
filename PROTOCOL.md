@@ -408,14 +408,14 @@ recalculated.
 Offset  Len  Field                 Example Value
 0       1    Start delimiter       0x3C ('<')
 1       1    Packet type           0x54 ('T' = Temperature)
-2       5    Device ID             02 CC 44 55 66 (raw bytes of cloud device ID)
-7       2    Unit config           0x30 0x30 (ASCII "00" = Celsius)
+2       5    Device ID             02 6E 37 5B 8C (raw bytes of cloud device ID)
+7       2    Config bytes          0x30 0x30 or 0x01 0x01
 9       1    Direction             0x00 = device→cloud, 0x01 = cloud→device (echo)
-10      1    Temp byte count       0x04 (4 bytes = 2 channels × 2 bytes)
-11      2    Temperature CH1       0x00D8 = 216 → 21.6°C (uint16 big-endian, ÷10)
-13      2    Temperature CH2       0x0000 = 0.0°C (no probe connected)
-15      1    Padding               0x00
-16      1    Checksum              0x5A
+10      1    Data byte count       0x04
+11      1    Padding               0x00
+12      2    Temperature CH1       u16 little-endian, ÷10 = °C
+14      2    Temperature CH2       u16 little-endian, ÷10 = °C
+16      1    Checksum
 17      1    End delimiter         0x3E ('>')
 ```
 
@@ -425,20 +425,28 @@ Device→Cloud:
 ```
 3C 54 02 CC 44 55 66 30 30 00 04 00 D8 00 00 00 99 3E
 ```
-Decoded: Device `02CC445566`, CH1 = 21.6°C, CH2 = 0.0°C
+Decoded: Device `02CC445566`, CH1 = 21.6°C (0xD8 0x00 LE = 216), CH2 = 0.0°C
 
 Cloud→Device echo:
 ```
 3C 54 02 CC 44 55 66 30 30 01 04 00 D8 00 00 00 9A 3E
 ```
-Identical except: byte 9 = `0x01` (echo), byte 16 = `0x5B` (adjusted checksum)
+Identical except: byte 9 = `0x01` (echo), checksum adjusted
 
 ### Temperature Encoding
 
-Temperatures are unsigned 16-bit big-endian integers divided by 10:
-- `0x00D8` = 216 → **21.6°C**
-- `0x0000` = 0 → **no probe connected**
+Temperatures are unsigned 16-bit **little-endian** integers at offsets 12 and 14,
+divided by 10:
+- `0xD8 0x00` = 216 → **21.6°C**
+- `0x2C 0x01` = 300 → **30.0°C**
+- `0x00 0x00` = 0 → **no probe connected**
 - Range: 0.0–6553.5°C (theoretical), practical: 0–500°C
+
+**Note**: the alarm packet uses the same little-endian layout — byte 11 is
+padding (0x00), followed by the temperature as u16 LE at bytes 12-13. For
+temperatures below 25.6°C (raw value < 256), the high byte is zero and the
+encoding looks identical to big-endian-at-[11,12], which is why the original
+analysis missed this.
 
 ### Checksum Algorithm
 

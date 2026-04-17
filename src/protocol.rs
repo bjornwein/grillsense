@@ -103,17 +103,23 @@ pub mod udp {
     /// Offset  Len  Field
     /// 0       1    Start delimiter '<' (0x3C)
     /// 1       1    Packet type 'T' (0x54)
-    /// 2       5    Device ID bytes (e.g. 02 CC 44 55 66)
-    /// 7       2    Unit/config bytes (ASCII "00" = Celsius)
+    /// 2       5    Device ID bytes (e.g. 02 6E 37 5B 8C)
+    /// 7       2    Config bytes (0x30 0x30 or 0x01 0x01)
     /// 9       1    Direction: 0x00=device→cloud, 0x01=cloud→device
-    /// 10      1    Channel count / flag (0x04 = 4 temp bytes = 2 channels)
-    /// 11      2    Temperature ch1 (u16 big-endian, value/10 = °C)
-    /// 13      2    Temperature ch2 (u16 big-endian, value/10 = °C)
-    /// 15      2    Padding byte (0x00) + Checksum
+    /// 10      1    Data byte count (0x04)
+    /// 11      1    Padding (0x00)
+    /// 12      2    Temperature CH1 (u16 little-endian, value/10 = °C)
+    /// 14      2    Temperature CH2 (u16 little-endian, value/10 = °C)
+    /// 16      1    Checksum
     /// 17      1    End delimiter '>' (0x3E)
     /// ```
     ///
     /// Checksum = (sum(bytes[1..16]) + 0x3C) & 0xFF
+    ///
+    /// Note: the alarm packet uses the same little-endian encoding at the
+    /// same offsets (byte 11 = padding, bytes 12-13 = u16 LE temperature).
+    /// Values below 256 (25.6°C) happened to parse identically with the
+    /// previous big-endian-at-[11,12] interpretation.
     #[derive(Debug, Clone, PartialEq)]
     pub struct TempPacket {
         pub device_id: String,
@@ -144,8 +150,8 @@ pub mod udp {
                 .map(|b| format!("{b:02X}"))
                 .collect::<String>();
 
-            let temp_ch1 = u16::from_be_bytes([data[11], data[12]]) as f64 / 10.0;
-            let temp_ch2 = u16::from_be_bytes([data[13], data[14]]) as f64 / 10.0;
+            let temp_ch1 = u16::from_le_bytes([data[12], data[13]]) as f64 / 10.0;
+            let temp_ch2 = u16::from_le_bytes([data[14], data[15]]) as f64 / 10.0;
 
             Some(TempPacket {
                 device_id,
@@ -165,12 +171,12 @@ pub mod udp {
         ) -> Vec<u8> {
             let mut pkt = vec![START_BYTE, TYPE_TEMP];
             pkt.extend_from_slice(device_id_bytes);
-            pkt.extend_from_slice(&[0x30, 0x30]); // "00" unit config
+            pkt.extend_from_slice(&[0x30, 0x30]); // config bytes
             pkt.push(direction);
-            pkt.push(0x04); // 4 temp bytes
-            pkt.extend_from_slice(&temp_ch1.to_be_bytes());
-            pkt.extend_from_slice(&temp_ch2.to_be_bytes());
+            pkt.push(0x04); // data byte count
             pkt.push(0x00); // padding
+            pkt.extend_from_slice(&temp_ch1.to_le_bytes());
+            pkt.extend_from_slice(&temp_ch2.to_le_bytes());
             let checksum = compute_checksum(&pkt[1..]);
             pkt.push(checksum);
             pkt.push(END_BYTE);
@@ -618,6 +624,23 @@ mod tests {
         assert_eq!(parsed.device_id, "02CC445566");
         assert!((parsed.temp_ch1 - 21.6).abs() < 0.01);
         assert_eq!(parsed.temp_ch2, 0.0);
+    }
+
+    #[test]
+    fn test_udp_packet_high_temp_roundtrip() {
+        // Temp above 25.6°C (raw > 255) — verifies little-endian encoding
+        let dev_id: [u8; 5] = [0x02, 0x6E, 0x37, 0x5B, 0x8C];
+        let built = udp::TempPacket::build(&dev_id, udp::DIR_DEVICE_TO_CLOUD, 300, 500);
+        let parsed = udp::TempPacket::parse(&built).expect("high temp roundtrip");
+        assert!((parsed.temp_ch1 - 30.0).abs() < 0.01);
+        assert!((parsed.temp_ch2 - 50.0).abs() < 0.01);
+
+        // Verify the LE byte layout: CH1=300=0x012C at [12,13], CH2=500=0x01F4 at [14,15]
+        assert_eq!(built[11], 0x00); // padding
+        assert_eq!(built[12], 0x2C); // CH1 low byte
+        assert_eq!(built[13], 0x01); // CH1 high byte
+        assert_eq!(built[14], 0xF4); // CH2 low byte
+        assert_eq!(built[15], 0x01); // CH2 high byte
     }
 
     #[test]
