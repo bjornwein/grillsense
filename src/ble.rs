@@ -74,7 +74,14 @@ impl ProvisionStep {
             Self::ConfirmAtMode => Some(CMD_CONFIRM_AT.to_string()),
             Self::GetMac => Some(CMD_GET_MAC.to_string()),
             Self::SetSsid => Some(format!("{CMD_SET_SSID_PREFIX}{}", config.wifi_ssid)),
-            Self::SetPassword => Some(format!("{CMD_SET_KEY_PREFIX}{}", config.wifi_password)),
+            Self::SetPassword => {
+                let prefix = if config.wifi_password.is_empty() {
+                    CMD_SET_KEY_PREFIX_OPEN
+                } else {
+                    CMD_SET_KEY_PREFIX_WPA2
+                };
+                Some(format!("{prefix}{}", config.wifi_password))
+            }
             Self::SetServer => Some(config.netp_command()),
             Self::SetStaMode => Some(CMD_SET_STA.to_string()),
             Self::Reboot => Some(CMD_REBOOT.to_string()),

@@ -21,7 +21,8 @@ pub mod ble {
     pub const CMD_CONFIRM_AT: &str = "a";
     pub const CMD_GET_MAC: &str = "AT+WSMAC";
     pub const CMD_SET_SSID_PREFIX: &str = "AT+WSSSID=";
-    pub const CMD_SET_KEY_PREFIX: &str = "AT+WSKEY=OPEN,NONE,";
+    pub const CMD_SET_KEY_PREFIX_OPEN: &str = "AT+WSKEY=OPEN,NONE,";
+    pub const CMD_SET_KEY_PREFIX_WPA2: &str = "AT+WSKEY=WPA2PSK,AES,";
     pub const CMD_SET_SERVER: &str = "AT+NETP=UDP,CLIENT,17000,smartserver.emaxtime.cn";
     pub const CMD_SET_STA: &str = "AT+WMODE=STA";
     pub const CMD_REBOOT: &str = "AT+Z";
