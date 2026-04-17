@@ -727,7 +727,9 @@ async fn cmd_local_monitor(
             println!("[mqtt] Learned device ID from first packet: {id}");
             Some(id)
         } else {
-            println!("[mqtt] Warning: Could not parse device ID from first packet, using 'unknown'");
+            println!(
+                "[mqtt] Warning: Could not parse device ID from first packet, using 'unknown'"
+            );
             None
         }
     } else {
