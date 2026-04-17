@@ -5,9 +5,12 @@ Reverse-engineered from the Android app `com.bbq.ap` v1.1.9 (GrillSense).
 ## Device Overview
 
 The device is a WiFi-enabled BBQ thermometer with 2 temperature probe channels.
-It uses a **Hi-Flying HF-A11** WiFi module controlled via AT commands.
+It uses a **Hi-Flying HF-LPT230** WiFi module and a **Freqchip FR-BLE-1.0** for
+Bluetooth LE. The WiFi module is controlled via AT commands.
 
 - **Manufacturer**: Ezon (branded as Dangrill, GrillSense, and others)
+- **WiFi module**: Hi-Flying HF-LPT230
+- **BLE chip**: Freqchip FR-BLE-1.0 (firmware 6.1.2)
 - **Connectivity**: BLE 4.0+ (provisioning) + WiFi 802.11 b/g/n (data)
 - **Cloud server**: `smartserver.emaxtime.cn`
 - **BLE advertisement name**: `Thermo-typ*` (prefix match)
@@ -367,12 +370,37 @@ Unit values: `"C"` (Celsius) or `"F"` (Fahrenheit).
 ## Device-to-Cloud UDP Binary Protocol
 
 The device sends temperature data via **UDP** to the cloud server on port **17000**.
-The protocol uses a simple fixed-length binary packet format.
+The protocol uses a binary packet format with shared framing.
 
 - Destination: `smartserver.emaxtime.cn:17000` (resolved: `47.52.241.127`)
 - Alternative endpoint found in APK: `47.52.149.125:10000` (G001 devices)
 - Packet interval: ~1 second (continuous while powered on)
-- Packet direction: device sends, cloud echoes back with direction flag flipped
+- Packet direction: device sends, server echoes back with direction flag flipped
+- **Important**: the device first sends keepalive packets (14 bytes) and only
+  starts sending temperature packets (18 bytes) once it receives echo responses.
+  A server that only echoes 18-byte packets will never receive temperature data.
+
+### Keepalive / Registration Packet (14 bytes)
+
+Sent by the device on startup before temperature data flows. The device repeats
+this packet ~1/sec until it receives an echo response, then switches to sending
+18-byte temperature packets.
+
+```
+Offset  Len  Field                 Example Value
+0       1    Start delimiter       0x3C ('<')
+1       1    Packet type           0x54 ('T')
+2       5    Device ID             02 6E 37 5B 8C
+7       2    Config bytes          0x01 0x01
+9       1    Direction             0x01
+10      1    Temp byte count       0x00 (no temperature data)
+11      1    Padding               0x00
+12      1    Checksum              0x21
+13      1    End delimiter         0x3E ('>')
+```
+
+Echo response: same packet with byte 9 flipped (`0x01` → `0x00`), checksum
+recalculated.
 
 ### Temperature Packet Format (18 bytes)
 
@@ -415,11 +443,12 @@ Temperatures are unsigned 16-bit big-endian integers divided by 10:
 ### Checksum Algorithm
 
 ```
-checksum = (sum(bytes[1..16]) + 0x3C) & 0xFF
+checksum = (sum(bytes[1..N-2]) + 0x3C) & 0xFF
 ```
 
 That is: sum all bytes between the start delimiter `<` (exclusive) and the checksum
 position, then add the start delimiter byte value (`0x3C`), truncate to 8 bits.
+This formula works for both 14-byte keepalive and 18-byte temperature packets.
 
 Verification for device packet:
 ```

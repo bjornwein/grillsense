@@ -916,19 +916,37 @@ async fn cmd_local_set_alarm(
 }
 
 /// Build an echo response for the device (mimics what the cloud does).
+/// Build an echo response for any valid device packet.
+///
+/// The device sends two packet sizes:
+/// - 18-byte temperature packets (with probe data)
+/// - 14-byte keepalive/registration packets (no probe data)
+///
+/// Both share the same framing: START(0x3C) ... checksum END(0x3E).
+/// The echo flips the direction byte at [9] and recomputes the checksum.
+/// Without echoing the keepalive packets, the device never starts sending
+/// temperature data.
 fn build_echo(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() != protocol::udp::TEMP_PACKET_LEN {
+    let len = data.len();
+    if len < 14 {
         return None;
     }
-    if data[0] != protocol::udp::START_BYTE || data[17] != protocol::udp::END_BYTE {
+    if data[0] != protocol::udp::START_BYTE || data[len - 1] != protocol::udp::END_BYTE {
         return None;
     }
-    if data[9] != protocol::udp::DIR_DEVICE_TO_CLOUD {
+    if data[1] != protocol::udp::TYPE_TEMP {
         return None;
     }
+
     let mut echo = data.to_vec();
-    echo[9] = protocol::udp::DIR_CLOUD_TO_DEVICE;
-    echo[16] = protocol::udp::compute_checksum(&echo[1..16]);
+    // Flip direction byte
+    echo[9] = if data[9] == protocol::udp::DIR_DEVICE_TO_CLOUD {
+        protocol::udp::DIR_CLOUD_TO_DEVICE
+    } else {
+        protocol::udp::DIR_DEVICE_TO_CLOUD
+    };
+    // Recompute checksum (second-to-last byte, content is bytes[1..len-2])
+    echo[len - 2] = protocol::udp::compute_checksum(&echo[1..len - 2]);
     Some(echo)
 }
 
