@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/hassio-addons/base:latest
+ARG BUILD_FROM=ghcr.io/hassio-addons/base:20.0.4
 
 # --- Build stage: compile Rust binary on Alpine (musl) ---
 FROM rust:1-alpine AS builder

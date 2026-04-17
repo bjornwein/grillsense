@@ -75,7 +75,7 @@ jobs:
           cache-from: type=gha,scope=grillsense-${{ matrix.architecture }}
           cache-to: type=gha,mode=max,scope=grillsense-${{ matrix.architecture }}
           build-args: |
-            BUILD_FROM=ghcr.io/hassio-addons/base:latest
+            BUILD_FROM=ghcr.io/hassio-addons/base:20.0.4
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             BUILD_DESCRIPTION=GrillSense WiFi BBQ thermometer integration for Home Assistant
             BUILD_NAME=GrillSense Thermometer
