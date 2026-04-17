@@ -212,6 +212,38 @@ pub mod udp {
         ((sum + START_BYTE as u32) & 0xFF) as u8
     }
 
+    /// Build an echo response for any valid device packet.
+    ///
+    /// The device sends two packet sizes:
+    /// - 18-byte temperature packets (with probe data)
+    /// - 14-byte keepalive/registration packets (no probe data)
+    ///
+    /// Both share the same framing: START(0x3C) ... checksum END(0x3E).
+    /// The echo flips the direction byte at offset 9 and recomputes the checksum.
+    /// Without echoing keepalive packets, the device never starts sending
+    /// temperature data.
+    pub fn build_echo(data: &[u8]) -> Option<Vec<u8>> {
+        let len = data.len();
+        if len < 14 {
+            return None;
+        }
+        if data[0] != START_BYTE || data[len - 1] != END_BYTE {
+            return None;
+        }
+        if data[1] != TYPE_TEMP {
+            return None;
+        }
+
+        let mut echo = data.to_vec();
+        echo[9] = if data[9] == DIR_DEVICE_TO_CLOUD {
+            DIR_CLOUD_TO_DEVICE
+        } else {
+            DIR_DEVICE_TO_CLOUD
+        };
+        echo[len - 2] = compute_checksum(&echo[1..len - 2]);
+        Some(echo)
+    }
+
     // Alarm packet constants
     /// Config bytes for alarm channel 1: ASCII "A1"
     pub const CONFIG_ALARM_CH1: [u8; 2] = [0x41, 0x31]; // 'A', '1'
@@ -666,5 +698,48 @@ mod tests {
         let (ch, temp) = udp::parse_alarm_packet(&pkt).expect("should parse ch2");
         assert_eq!(ch, 2);
         assert!((temp - 80.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_build_echo_18byte_temp_packet() {
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0xCC, 0x44, 0x55, 0x66, 0x30, 0x30, 0x00, 0x04, 0x00, 0xD8, 0x00,
+            0x00, 0x00, 0x99, 0x3E,
+        ];
+        let echo = udp::build_echo(&data).expect("should build echo");
+        assert_eq!(echo.len(), 18);
+        assert_eq!(echo[9], udp::DIR_CLOUD_TO_DEVICE);
+        assert_eq!(echo[0], 0x3C);
+        assert_eq!(echo[17], 0x3E);
+        // Checksum should differ from original
+        assert_ne!(echo[16], data[16]);
+        assert_eq!(echo[16], udp::compute_checksum(&echo[1..16]));
+    }
+
+    #[test]
+    fn test_build_echo_14byte_keepalive() {
+        // Real captured keepalive: 3c 54 02 6e 37 5b 8c 01 01 01 00 00 21 3e
+        let data: Vec<u8> = vec![
+            0x3C, 0x54, 0x02, 0x6E, 0x37, 0x5B, 0x8C, 0x01, 0x01, 0x01, 0x00, 0x00, 0x21, 0x3E,
+        ];
+        let echo = udp::build_echo(&data).expect("should build echo for keepalive");
+        assert_eq!(echo.len(), 14);
+        // Direction flipped: 0x01 → 0x00
+        assert_eq!(echo[9], udp::DIR_DEVICE_TO_CLOUD);
+        assert_eq!(echo[12], udp::compute_checksum(&echo[1..12]));
+    }
+
+    #[test]
+    fn test_build_echo_rejects_short_packet() {
+        let data: Vec<u8> = vec![0x3C, 0x54, 0x00, 0x00, 0x3E];
+        assert!(udp::build_echo(&data).is_none());
+    }
+
+    #[test]
+    fn test_build_echo_rejects_bad_framing() {
+        let data: Vec<u8> = vec![
+            0x00, 0x54, 0x02, 0x6E, 0x37, 0x5B, 0x8C, 0x01, 0x01, 0x01, 0x00, 0x00, 0x21, 0x3E,
+        ];
+        assert!(udp::build_echo(&data).is_none());
     }
 }

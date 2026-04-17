@@ -122,6 +122,11 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<()> {
                     let _ = tx.try_send(pkt);
                 }
 
+                // Echo back to device (keeps protocol flowing for keepalive packets)
+                if let Some(echo) = protocol::udp::build_echo(data) {
+                    let _ = listen_socket.send_to(&echo, src).await;
+                }
+
                 // Forward to cloud
                 if config.forward_to_cloud
                     && let Err(e) = cloud_socket.send_to(data, config.cloud_addr).await {
