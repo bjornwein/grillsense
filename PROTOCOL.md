@@ -231,7 +231,8 @@ Response:
 
 Error Response:
 {
-    "error_code": "<code>"
+    "error_code": "102",
+    "error_message": "设备不存在"
 }
 ```
 
@@ -239,6 +240,15 @@ Error Response:
 - `temperature_ch2`: Probe 2 temperature in **Celsius**
 - `is_online`: Whether the device is currently connected
 - Values of `0.0` typically mean no probe connected
+
+**Known error codes:**
+
+| Code | Message (Chinese)  | Meaning                |
+|------|--------------------|------------------------|
+| 102  | 设备不存在          | Device does not exist  |
+
+**Note:** The `devmac` parameter format may vary. Use `idev/list` to see the
+exact MAC format the server expects for your device.
 
 #### Set Alarm Temperature
 ```

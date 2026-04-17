@@ -39,13 +39,42 @@ impl CloudClient {
     }
 
     /// Set the device MAC for temperature operations.
+    /// Normalizes the MAC by removing colons/hyphens and lowercasing.
     pub fn set_device_mac(&mut self, mac: String) {
-        self.device_mac = Some(mac);
+        self.device_mac = Some(normalize_mac(&mac));
     }
 
     /// Get the currently set device MAC.
     pub fn device_mac(&self) -> Option<&str> {
         self.device_mac.as_deref()
+    }
+
+    /// Get the raw (un-normalized) MAC variants to try if the first fails.
+    fn mac_variants(mac: &str) -> Vec<String> {
+        let stripped = mac.replace([':', '-'], "").to_lowercase();
+        let with_colons = if stripped.len() == 12 {
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                &stripped[0..2],
+                &stripped[2..4],
+                &stripped[4..6],
+                &stripped[6..8],
+                &stripped[8..10],
+                &stripped[10..12],
+            )
+        } else {
+            stripped.clone()
+        };
+        // Try multiple formats: stripped, with colons lowercase, with colons uppercase, original
+        let mut variants = vec![
+            stripped.clone(),
+            with_colons.clone(),
+            with_colons.to_uppercase(),
+            stripped.to_uppercase(),
+            mac.to_string(),
+        ];
+        variants.dedup();
+        variants
     }
 
     /// Login with email and password. Stores the token on success.
@@ -68,12 +97,8 @@ impl CloudClient {
 
         // Check for error response
         if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-            if err.result.is_some() && err.info.is_some() {
-                bail!(
-                    "Login failed: {} (code: {})",
-                    err.info.unwrap(),
-                    err.result.unwrap()
-                );
+            if err.is_error() {
+                bail!("Login failed: {}", err.description());
             }
         }
 
@@ -154,32 +179,58 @@ impl CloudClient {
     }
 
     /// Get current temperature from the device.
+    /// Tries multiple MAC format variants if the first attempt returns "device not found".
     pub async fn get_temperature(&self) -> Result<TempResult> {
         let mac = self.device_mac.as_ref().context("No device MAC set")?;
-        let url = format!("{}thermo/temperature?devmac={}", self.base_url, mac);
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Temperature request failed")?;
+        // Try the stored MAC first, then variants if we get error 102
+        let variants = Self::mac_variants(mac);
+        let mut last_error = None;
 
-        let text = resp.text().await.context("Failed to read temperature response")?;
+        for variant in &variants {
+            let url = format!("{}thermo/temperature?devmac={}", self.base_url, variant);
 
-        // Check for error
-        if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
-            if err.error_code.is_some() {
-                bail!(
-                    "Temperature read failed: {}",
-                    err.error_code.unwrap_or_default()
-                );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .context("Temperature request failed")?;
+
+            let text = resp
+                .text()
+                .await
+                .context("Failed to read temperature response")?;
+
+            // Check for error response
+            if let Ok(err) = serde_json::from_str::<ApiError>(&text) {
+                if err.is_error() {
+                    // If "device not found", try next MAC variant
+                    if err.error_code.as_deref()
+                        == Some(protocol::error_codes::DEVICE_NOT_FOUND)
+                    {
+                        last_error = Some(err.description());
+                        continue;
+                    }
+                    bail!("Cloud API error: {}", err.description());
+                }
+            }
+
+            // Try to parse as temperature result
+            match serde_json::from_str::<TempResult>(&text) {
+                Ok(temp) => return Ok(temp),
+                Err(e) => {
+                    last_error = Some(format!("Failed to parse response: {e}\nRaw: {text}"));
+                    continue;
+                }
             }
         }
 
-        let temp: TempResult =
-            serde_json::from_str(&text).context("Failed to parse temperature response")?;
-        Ok(temp)
+        bail!(
+            "Device not found with any MAC format variant (tried: {}). Last error: {}",
+            variants.join(", "),
+            last_error.unwrap_or_default()
+        );
     }
 
     /// Set alarm temperature for channel 1.
@@ -219,6 +270,11 @@ fn md5_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     hex::encode(result)
+}
+
+/// Normalize a MAC address to lowercase without separators.
+fn normalize_mac(mac: &str) -> String {
+    mac.replace([':', '-'], "").to_lowercase()
 }
 
 // Tiny hex encoder to avoid pulling in the `hex` crate.

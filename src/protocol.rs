@@ -127,6 +127,45 @@ pub struct ApiError {
     pub info: Option<String>,
     #[serde(default)]
     pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+}
+
+impl ApiError {
+    /// Check if this represents an actual error (has error_code or non-zero result).
+    pub fn is_error(&self) -> bool {
+        self.error_code.is_some() || matches!(self.result, Some(r) if r != 0)
+    }
+
+    /// Human-readable error description.
+    pub fn description(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(code) = &self.error_code {
+            parts.push(format!("error {code}"));
+        }
+        if let Some(msg) = &self.error_message {
+            parts.push(msg.clone());
+        }
+        if let Some(info) = &self.info {
+            parts.push(info.clone());
+        }
+        if let Some(result) = self.result {
+            if result != 0 && self.error_code.is_none() {
+                parts.push(format!("result code {result}"));
+            }
+        }
+        if parts.is_empty() {
+            "unknown error".to_string()
+        } else {
+            parts.join(": ")
+        }
+    }
+}
+
+/// Known cloud API error codes.
+pub mod error_codes {
+    /// Device does not exist (设备不存在).
+    pub const DEVICE_NOT_FOUND: &str = "102";
 }
 
 /// Temperature unit.
