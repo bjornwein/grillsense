@@ -812,8 +812,13 @@ async fn cmd_local_monitor(
         let (len, addr) = sock.recv_from(&mut buf).await?;
         let data = &buf[..len];
 
-        // Echo back so device stays connected
-        if let Some(echo) = build_echo(data) {
+        // Echo back so device stays connected.
+        // Skip alarm packets — echoing them creates a loop where the device
+        // re-acknowledges the echo, generating infinite alarm traffic.
+        let is_alarm = protocol::udp::parse_alarm_packet(data).is_some();
+        if !is_alarm
+            && let Some(echo) = build_echo(data)
+        {
             let _ = sock.send_to(&echo, addr).await;
         }
 
@@ -1105,14 +1110,18 @@ async fn mqtt_proxy_publisher(
                             }
                 }
 
-                // Track alarm setpoints from cloud→device alarm packets
+                // Track alarm setpoints from alarm packets
                 if let Some(udp::ParsedData::Alarm { channel, temp_c }) = &pkt.parsed {
                     match channel {
                         1 => alarm_ch1 = *temp_c,
                         2 => alarm_ch2 = *temp_c,
                         _ => {}
                     }
-                    println!("[mqtt] Alarm CH{channel} updated to {temp_c:.1}°C (from cloud)");
+                    let source = match pkt.direction {
+                        udp::PacketDirection::DeviceToCloud => "device",
+                        udp::PacketDirection::CloudToDevice => "cloud",
+                    };
+                    println!("[mqtt] Alarm CH{channel} set to {temp_c:.1}°C (from {source})");
                 }
 
                 if pkt.direction != udp::PacketDirection::DeviceToCloud {
