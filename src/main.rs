@@ -672,6 +672,7 @@ async fn cmd_proxy(
         let mqtt_pass = mqtt_pass.clone();
         let device_name = device_name.to_string();
         tokio::spawn(async move {
+            let mut attempts = 0u32;
             loop {
                 match mqtt_proxy_publisher(
                     &mut packet_rx,
@@ -686,8 +687,11 @@ async fn cmd_proxy(
                 {
                     Ok(()) => break,
                     Err(e) => {
-                        eprintln!("MQTT publisher error: {e}, reconnecting in 5s...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        attempts += 1;
+                        let delay = (5 * attempts).min(60);
+                        eprintln!("[mqtt] Publisher error: {e}");
+                        eprintln!("[mqtt] Reconnecting in {delay}s (attempt {attempts})...");
+                        tokio::time::sleep(Duration::from_secs(delay.into())).await;
                     }
                 }
             }
@@ -783,6 +787,7 @@ async fn cmd_local_monitor(
         let mqtt_pass = mqtt_pass.clone();
         let device_name = device_name.to_string();
         tokio::spawn(async move {
+            let mut attempts = 0u32;
             loop {
                 match mqtt_proxy_publisher(
                     &mut rx,
@@ -797,8 +802,11 @@ async fn cmd_local_monitor(
                 {
                     Ok(()) => break,
                     Err(e) => {
-                        eprintln!("[mqtt] Publisher error: {e}, reconnecting in 5s...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        attempts += 1;
+                        let delay = (5 * attempts).min(60);
+                        eprintln!("[mqtt] Publisher error: {e}");
+                        eprintln!("[mqtt] Reconnecting in {delay}s (attempt {attempts})...");
+                        tokio::time::sleep(Duration::from_secs(delay.into())).await;
                     }
                 }
             }
@@ -1139,7 +1147,10 @@ async fn mqtt_proxy_publisher(
             }
 
             cmd = mqtt_cmd_rx.recv() => {
-                let Some((channel, temp_c)) = cmd else { break };
+                let Some((channel, temp_c)) = cmd else {
+                    // Reader task exited — MQTT connection lost
+                    anyhow::bail!("MQTT reader task exited — connection lost");
+                };
 
                 println!("[mqtt] Alarm command received: CH{channel} = {temp_c:.1}°C");
 
