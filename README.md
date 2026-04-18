@@ -212,7 +212,7 @@ MQTT discovery.
 
 ## Hardware
 
-- **Thermometer**: Dangrill / GrillSense / Ezon / Prograde / Austin and Barbeque (AABQ) WiFi BBQ (2-channel)
+- **Thermometer**: Dangrill / GrillSense / Ezon / Prograde / Austin and Barbeque (AABQ) WiFi BBQ
 - **WiFi module**: Hi-Flying HF-LPT230, firmware v4.12.17
 - **Connectivity**: BLE 4.0 (provisioning) + WiFi 802.11 b/g/n (data)
 - **Cloud**: `smartserver.emaxtime.cn` (Hong Kong)
