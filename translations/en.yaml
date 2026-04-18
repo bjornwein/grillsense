@@ -12,13 +12,9 @@
       "name": "Device name",
       "description": "Name shown in Home Assistant for this thermometer."
     },
-    "cloud_email": {
-      "name": "Cloud email",
-      "description": "GrillSense account email. Only needed in cloud mode."
-    },
-    "cloud_password": {
-      "name": "Cloud password",
-      "description": "GrillSense account password. Only needed in cloud mode."
+    "device_mac": {
+      "name": "Device MAC",
+      "description": "WiFi MAC address of the thermometer (e.g. AABBCC445566). Only needed in cloud mode."
     },
     "mqtt_host": {
       "name": "MQTT host (override)",

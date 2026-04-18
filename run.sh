@@ -32,17 +32,16 @@ fi
 
 # --- Launch ---
 if [ "${MODE}" = "cloud" ]; then
-    CLOUD_EMAIL=$(bashio::config 'cloud_email')
-    CLOUD_PASS=$(bashio::config 'cloud_password')
+    DEVICE_MAC=$(bashio::config 'device_mac')
 
-    if [ -z "${CLOUD_EMAIL}" ] || [ -z "${CLOUD_PASS}" ]; then
-        bashio::log.fatal "Cloud mode requires cloud_email and cloud_password"
+    if [ -z "${DEVICE_MAC}" ]; then
+        bashio::log.fatal "Cloud mode requires device_mac (WiFi MAC from 'local discover')"
         exit 1
     fi
 
-    bashio::log.info "Starting GrillSense in cloud mode..."
+    bashio::log.info "Starting GrillSense in cloud mode for device ${DEVICE_MAC}..."
     exec /usr/bin/grillsense cloud monitor \
-        --email "${CLOUD_EMAIL}" --password "${CLOUD_PASS}" \
+        --mac "${DEVICE_MAC}" \
         ${MQTT_ARGS} \
         --device-name "${DEVICE_NAME}"
 else
