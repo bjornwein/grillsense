@@ -229,9 +229,8 @@ MQTT discovery.
 
 ## Roadmap
 
-- [ ] BLE provisioning command (configure WiFi + server from CLI)
-- [ ] Home Assistant config flow for all three operating modes (local, cloud, proxy)
-- [ ] Auto-provisioning: discover and configure new devices from Home Assistant
+- [ ] HA-native local mode provisioning (and cloud mode restoring)
+- [ ] Finish proxy mode for HA integration
 
 ## License
 
