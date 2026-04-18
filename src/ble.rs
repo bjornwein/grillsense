@@ -61,6 +61,7 @@ pub enum ProvisionStep {
     SetPassword,
     SetServer,
     SetStaMode,
+    SaveToFlash,
     Reboot,
     Done,
 }
@@ -83,6 +84,7 @@ impl ProvisionStep {
             }
             Self::SetServer => Some(config.netp_command()),
             Self::SetStaMode => Some(CMD_SET_STA.to_string()),
+            Self::SaveToFlash => Some(CMD_SAVE_FLASH.to_string()),
             Self::Reboot => Some(CMD_REBOOT.to_string()),
             Self::Done => None,
         }
@@ -102,7 +104,8 @@ impl ProvisionStep {
             Self::SetSsid => Self::SetPassword,
             Self::SetPassword => Self::SetServer,
             Self::SetServer => Self::SetStaMode,
-            Self::SetStaMode => Self::Reboot,
+            Self::SetStaMode => Self::SaveToFlash,
+            Self::SaveToFlash => Self::Reboot,
             Self::Reboot => Self::Done,
             Self::Done => Self::Done,
         }
@@ -388,7 +391,7 @@ mod tests {
             step = step.next();
             count += 1;
         }
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
     }
 
     #[test]

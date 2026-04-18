@@ -71,7 +71,8 @@ the BLE characteristic. Each step waits for a notify response.
 | 5    | `AT+WSKEY=OPEN,NONE,<password>`                     | `+ok`             | Set WiFi password              |
 | 6    | `AT+NETP=UDP,CLIENT,17000,smartserver.emaxtime.cn`  | `+ok`             | Set cloud server endpoint      |
 | 7    | `AT+WMODE=STA`                                      | `+ok`             | Set WiFi to station mode       |
-| 8    | `AT+Z`                                              | `+ok`             | Reboot/apply settings          |
+| 8    | `AT+CFGTF`                                          | `+ok`             | Save config to flash           |
+| 9    | `AT+Z`                                              | `+ok`             | Reboot/apply settings          |
 
 **Response format**: All responses start with `+ok` on success or `+ERR` on failure.
 MAC address is returned as `+ok=<MAC>` in step 3.
@@ -122,6 +123,7 @@ Confirmed working on HF-LPT230 firmware v4.12.17:
 | `AT+UART`            | Get/set UART settings            | `+ok=9600,8,1,None,NFC`               |
 | `AT+VER`             | Get firmware version             | `+ok=4.12.17 (2019-01-09 10:30 1M)`   |
 | `AT+TCPTO`           | Get/set TCP timeout              | `+ok=300`                              |
+| `AT+CFGTF`           | Save config to flash             | `+ok`                                  |
 | `AT+Z`               | Reboot (preserves settings)      | `+ok`                                  |
 | `AT+RELD`            | **Factory reset** (wipes config) | `+ok=rebooting...`                     |
 

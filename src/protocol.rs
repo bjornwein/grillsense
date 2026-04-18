@@ -26,6 +26,8 @@ pub mod ble {
     pub const CMD_SET_SERVER: &str = "AT+NETP=UDP,CLIENT,17000,smartserver.emaxtime.cn";
     pub const CMD_SET_STA: &str = "AT+WMODE=STA";
     pub const CMD_REBOOT: &str = "AT+Z";
+    /// Save configuration to flash (persists settings across reboot).
+    pub const CMD_SAVE_FLASH: &str = "AT+CFGTF";
 
     /// Maximum BLE payload per chunk (20-byte MTU minus 2-byte header).
     pub const MAX_CHUNK_PAYLOAD: usize = 18;

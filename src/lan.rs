@@ -214,12 +214,19 @@ pub async fn configure_device(
     };
     let netp_cmd = format!("AT+NETP=UDP,CLIENT,{server_port},{server_host}");
 
-    let labels = ["Set SSID", "Set WiFi key", "Set server", "Set STA mode"];
+    let labels = [
+        "Set SSID",
+        "Set WiFi key",
+        "Set server",
+        "Set STA mode",
+        "Save to flash",
+    ];
     let commands = [
         format!("AT+WSSSID={ssid}"),
         key_cmd,
         netp_cmd,
         "AT+WMODE=STA".to_string(),
+        "AT+CFGTF".to_string(),
     ];
     let cmd_refs: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
 
