@@ -13,8 +13,8 @@
       "description": "Name shown in Home Assistant for this thermometer."
     },
     "device_mac": {
-      "name": "Device MAC",
-      "description": "WiFi MAC address of the thermometer (e.g. AABBCC445566). Only needed in cloud mode."
+      "name": "Device MAC address",
+      "description": "WiFi MAC address of unit to monitor (e.g. AABBCC445566). Leave empty to autodiscover. Only used in cloud mode."
     },
     "mqtt_host": {
       "name": "MQTT host (override)",
