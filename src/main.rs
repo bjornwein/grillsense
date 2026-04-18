@@ -640,18 +640,24 @@ async fn cmd_proxy(
         let mqtt_pass = mqtt_pass.clone();
         let device_name = device_name.to_string();
         tokio::spawn(async move {
-            if let Err(e) = mqtt_proxy_publisher(
-                &mut packet_rx,
-                &mac_id,
-                &mqtt_host,
-                mqtt_port,
-                mqtt_user,
-                mqtt_pass,
-                &device_name,
-            )
-            .await
-            {
-                eprintln!("MQTT publisher error: {e}");
+            loop {
+                match mqtt_proxy_publisher(
+                    &mut packet_rx,
+                    &mac_id,
+                    &mqtt_host,
+                    mqtt_port,
+                    mqtt_user.clone(),
+                    mqtt_pass.clone(),
+                    &device_name,
+                )
+                .await
+                {
+                    Ok(()) => break,
+                    Err(e) => {
+                        eprintln!("MQTT publisher error: {e}, reconnecting in 5s...");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         });
     } else {
@@ -745,18 +751,24 @@ async fn cmd_local_monitor(
         let mqtt_pass = mqtt_pass.clone();
         let device_name = device_name.to_string();
         tokio::spawn(async move {
-            if let Err(e) = mqtt_proxy_publisher(
-                &mut rx,
-                &mac_id,
-                &mqtt_host,
-                mqtt_port,
-                mqtt_user,
-                mqtt_pass,
-                &device_name,
-            )
-            .await
-            {
-                eprintln!("[mqtt] Publisher error: {e}");
+            loop {
+                match mqtt_proxy_publisher(
+                    &mut rx,
+                    &mac_id,
+                    &mqtt_host,
+                    mqtt_port,
+                    mqtt_user.clone(),
+                    mqtt_pass.clone(),
+                    &device_name,
+                )
+                .await
+                {
+                    Ok(()) => break,
+                    Err(e) => {
+                        eprintln!("[mqtt] Publisher error: {e}, reconnecting in 5s...");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         });
         Some(tx)
@@ -1034,7 +1046,10 @@ async fn mqtt_proxy_publisher(
         }
     });
 
-    // Main loop: process device packets and MQTT alarm commands
+    // Main loop: process device packets, MQTT alarm commands, and keepalive
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
             pkt = rx.recv() => {
@@ -1084,10 +1099,11 @@ async fn mqtt_proxy_publisher(
                         &config.state_topic(), state.as_bytes(), false,
                     );
                     writer.write_all(&packet).await?;
-
-                    // Keepalive
-                    writer.write_all(&[0xC0, 0x00]).await?;
                 }
+            }
+
+            _ = ping_interval.tick() => {
+                writer.write_all(&[0xC0, 0x00]).await?;
             }
 
             cmd = mqtt_cmd_rx.recv() => {
