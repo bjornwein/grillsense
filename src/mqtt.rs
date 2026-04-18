@@ -200,6 +200,7 @@ pub async fn run_bridge_with_reconnect(config: &MqttHaConfig, client: &CloudClie
 
 /// Run the MQTT-HA bridge, polling the cloud API and publishing to MQTT.
 ///
+/// Subscribes to alarm command topics and forwards setpoints to the cloud API.
 /// This function uses a simple TCP-based MQTT v3.1.1 implementation to avoid
 /// pulling in a full MQTT crate. For production use, consider rumqttc.
 pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<()> {
@@ -207,7 +208,7 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
     use tokio::net::TcpStream;
 
     let addr = format!("{}:{}", config.broker_host, config.broker_port);
-    let mut stream = TcpStream::connect(&addr)
+    let stream = TcpStream::connect(&addr)
         .await
         .with_context(|| format!("Failed to connect to MQTT broker at {addr}"))?;
 
@@ -219,11 +220,14 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
         // LWT: mark as offline on disconnect
         Some((&config.availability_topic(), "offline")),
     );
-    stream.write_all(&connect_packet).await?;
+
+    let (reader, mut writer) = stream.into_split();
+    writer.write_all(&connect_packet).await?;
 
     // Read CONNACK
     let mut buf = [0u8; 4];
-    stream.read_exact(&mut buf).await?;
+    let mut reader = reader;
+    reader.read_exact(&mut buf).await?;
     if buf[0] != 0x20 || buf[3] != 0x00 {
         anyhow::bail!("MQTT CONNACK failed (return code: {})", buf[3]);
     }
@@ -233,48 +237,123 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
     // Publish discovery messages (retained)
     for (topic, payload) in config.discovery_messages() {
         let packet = build_mqtt_publish(&topic, payload.as_bytes(), true);
-        stream.write_all(&packet).await?;
+        writer.write_all(&packet).await?;
     }
-    println!("Published HA discovery config for 7 entities (6 probes + online)");
+    println!("Published HA discovery config for 9 entities (6 probes + online + 2 alarms)");
+
+    // Subscribe to alarm command topics
+    let alarm_ch1_topic = config.alarm_command_topic(1);
+    let alarm_ch2_topic = config.alarm_command_topic(2);
+    let sub_packet = build_mqtt_subscribe(&[alarm_ch1_topic.as_str(), alarm_ch2_topic.as_str()], 1);
+    writer.write_all(&sub_packet).await?;
+    println!("[mqtt] Subscribed to alarm commands: {alarm_ch1_topic}, {alarm_ch2_topic}");
 
     // Publish online availability
     let avail_packet = build_mqtt_publish(&config.availability_topic(), b"online", true);
-    stream.write_all(&avail_packet).await?;
+    writer.write_all(&avail_packet).await?;
+
+    // Track alarm setpoints for state publishing
+    let mut alarm_ch1: f64 = 0.0;
+    let mut alarm_ch2: f64 = 0.0;
+
+    // Spawn reader task for incoming MQTT messages (alarm commands, PINGRESP)
+    let (alarm_tx, mut alarm_rx) = tokio::sync::mpsc::channel::<(u8, f64)>(16);
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let mut partial = Vec::new();
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    partial.extend_from_slice(&buf[..n]);
+                    while let Some(pkt_len) = mqtt_packet_len(&partial) {
+                        if partial.len() < pkt_len {
+                            break;
+                        }
+                        let pkt_data: Vec<u8> = partial.drain(..pkt_len).collect();
+                        if let Some((topic, payload, _)) = parse_incoming_publish(&pkt_data)
+                            && let Ok(text) = std::str::from_utf8(&payload)
+                            && let Ok(temp) = text.trim().parse::<f64>()
+                        {
+                            let channel = if topic.contains("alarm_ch2") { 2 } else { 1 };
+                            let _ = alarm_tx.try_send((channel, temp));
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     println!(
         "Polling temperature every {:?}, publishing to MQTT...",
         config.poll_interval
     );
 
-    // Main loop: poll temperature and publish
-    loop {
-        match client.get_temperature().await {
-            Ok(temp) => {
-                let payload = config.state_payload(&temp);
-                let packet = build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
-                stream.write_all(&packet).await?;
+    // Main loop: poll temperature, handle alarm commands, keepalive
+    let mut poll_interval = tokio::time::interval(config.poll_interval);
+    poll_interval.tick().await; // consume immediate first tick
 
-                // Also update availability — stale data (>60s) counts as offline
-                let is_fresh = temp.online() && !temp.is_stale(60);
-                let status = if is_fresh { "online" } else { "offline" };
-                let avail =
-                    build_mqtt_publish(&config.availability_topic(), status.as_bytes(), true);
-                stream.write_all(&avail).await?;
+    loop {
+        tokio::select! {
+            _ = poll_interval.tick() => {
+                match client.get_temperature().await {
+                    Ok(temp) => {
+                        let mut payload = serde_json::json!({
+                            "temperature_ch1": temp.temperature_ch1,
+                            "temperature_ch2": temp.temperature_ch2,
+                            "temperature_ch3": temp.temperature_ch3,
+                            "temperature_ch4": temp.temperature_ch4,
+                            "temperature_ch5": temp.temperature_ch5,
+                            "temperature_ch6": temp.temperature_ch6,
+                            "is_online": temp.online(),
+                            "data_age_secs": temp.age_secs(),
+                        });
+                        // Include alarm setpoints if set
+                        if alarm_ch1 > 0.0 {
+                            payload["alarm_ch1"] = serde_json::json!(alarm_ch1);
+                        }
+                        if alarm_ch2 > 0.0 {
+                            payload["alarm_ch2"] = serde_json::json!(alarm_ch2);
+                        }
+                        let state = serde_json::to_string(&payload).unwrap();
+                        let packet = build_mqtt_publish(&config.state_topic(), state.as_bytes(), false);
+                        writer.write_all(&packet).await?;
+
+                        let is_fresh = temp.online() && !temp.is_stale(60);
+                        let status = if is_fresh { "online" } else { "offline" };
+                        let avail =
+                            build_mqtt_publish(&config.availability_topic(), status.as_bytes(), true);
+                        writer.write_all(&avail).await?;
+                    }
+                    Err(e) => {
+                        eprintln!("Temperature poll error: {e}");
+                    }
+                }
+
+                // Send PINGREQ to keep connection alive
+                writer.write_all(&[0xC0, 0x00]).await?;
             }
-            Err(e) => {
-                eprintln!("Temperature poll error: {e}");
+            cmd = alarm_rx.recv() => {
+                let Some((channel, temp_c)) = cmd else { break };
+                eprintln!("[mqtt] Alarm command: CH{channel} = {temp_c:.1}°C");
+                match client.set_alarm_temp(channel, temp_c).await {
+                    Ok(()) => {
+                        match channel {
+                            1 => alarm_ch1 = temp_c,
+                            2 => alarm_ch2 = temp_c,
+                            _ => {}
+                        }
+                        println!("[mqtt] Alarm CH{channel} set to {temp_c:.1}°C via cloud API");
+                    }
+                    Err(e) => {
+                        eprintln!("[mqtt] Failed to set alarm via cloud: {e}");
+                    }
+                }
             }
         }
-
-        // Send PINGREQ to keep connection alive
-        stream.write_all(&[0xC0, 0x00]).await?;
-
-        // Read any pending data (PINGRESP, etc.) — non-blocking
-        let mut resp_buf = [0u8; 256];
-        let _ = tokio::time::timeout(Duration::from_millis(100), stream.read(&mut resp_buf)).await;
-
-        tokio::time::sleep(config.poll_interval).await;
     }
+
+    Ok(())
 }
 
 /// Build a minimal MQTT v3.1.1 CONNECT packet.

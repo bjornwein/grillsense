@@ -180,14 +180,15 @@ impl CloudClient {
         Ok(temp)
     }
 
-    /// Set alarm temperature for channel 1.
-    pub async fn set_alarm_temp(&self, temp_celsius: f64) -> Result<()> {
+    /// Set alarm temperature for a channel (1 or 2).
+    pub async fn set_alarm_temp(&self, channel: u8, temp_celsius: f64) -> Result<()> {
         let mac = self.device_mac.as_ref().context("No device MAC set")?;
         let url = format!("{}thermo/set_alarm_temp?devmac={}", self.base_url, mac);
 
+        let key = format!("alarm_temp_ch{channel}");
         self.client
             .post(&url)
-            .json(&json!({ "alarm_temp_ch1": temp_celsius }))
+            .json(&json!({ key: temp_celsius }))
             .send()
             .await
             .context("Set alarm temp request failed")?;

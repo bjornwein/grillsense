@@ -553,7 +553,7 @@ async fn cmd_cloud_set_alarm(mac: &str, temp: f64) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
     client.set_device_mac(mac.to_string());
 
-    client.set_alarm_temp(temp).await?;
+    client.set_alarm_temp(1, temp).await?;
     println!("Alarm temperature set to {:.1}°C for device {}", temp, mac);
 
     Ok(())
