@@ -2,6 +2,7 @@
 name = "grillsense"
 version = "0.1.8"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [features]
 ble = ["dep:btleplug", "dep:futures", "dep:uuid"]

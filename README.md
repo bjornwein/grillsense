@@ -233,6 +233,9 @@ MQTT discovery.
 
 ## License
 
-This project is for personal and educational use. The protocol
-documentation was obtained through reverse engineering of publicly
-available firmware and apps.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
