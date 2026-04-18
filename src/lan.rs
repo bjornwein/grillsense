@@ -104,6 +104,36 @@ pub async fn send_at_command(ip: &str, command: &str) -> Result<String> {
     results.into_iter().next().context("No response")
 }
 
+/// Discover the first GrillSense device on the network, retrying until found.
+///
+/// Sends broadcast discovery every `interval` seconds, up to `max_attempts` times.
+/// Returns the first device found.
+pub async fn discover_with_retry(interval_secs: u64, max_attempts: u32) -> Result<DeviceDiscovery> {
+    for attempt in 1..=max_attempts {
+        eprintln!("[discover] Broadcast scan attempt {attempt}/{max_attempts}...");
+        match discover_broadcast(interval_secs).await {
+            Ok(devices) if !devices.is_empty() => {
+                let dev = devices.into_iter().next().unwrap();
+                eprintln!("[discover] Found {} ({}) at {}", dev.model, dev.mac, dev.ip);
+                return Ok(dev);
+            }
+            Ok(_) => {
+                if attempt < max_attempts {
+                    eprintln!("[discover] No devices found, retrying in {interval_secs}s...");
+                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                }
+            }
+            Err(e) => {
+                eprintln!("[discover] Scan error: {e}");
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                }
+            }
+        }
+    }
+    anyhow::bail!("No GrillSense device found after {max_attempts} discovery attempts")
+}
+
 /// Send multiple AT commands in a single session.
 ///
 /// Opens one UDP session: discovery → +ok → cmd1 → cmd2 → ...

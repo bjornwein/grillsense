@@ -57,7 +57,10 @@ enum CloudCommands {
     Monitor {
         /// Device MAC address (WiFi MAC from 'local discover')
         #[arg(short, long)]
-        mac: String,
+        mac: Option<String>,
+        /// Auto-discover device MAC via LAN broadcast
+        #[arg(long)]
+        autodiscover: bool,
         /// Auth token (optional — not needed for temperature reads)
         #[arg(short, long, default_value = "")]
         token: String,
@@ -252,6 +255,7 @@ async fn main() -> Result<()> {
             CloudCommands::Monitor {
                 token,
                 mac,
+                autodiscover,
                 interval,
                 fahrenheit,
                 mqtt,
@@ -261,9 +265,10 @@ async fn main() -> Result<()> {
                 mqtt_pass,
                 device_name,
             } => {
+                let resolved_mac = resolve_device_mac(mac, autodiscover).await?;
                 cmd_cloud_monitor(
                     &token,
-                    &mac,
+                    &resolved_mac,
                     interval,
                     fahrenheit,
                     mqtt,
@@ -350,6 +355,22 @@ async fn main() -> Result<()> {
             } => cmd_ble_provision(&ssid, &wifi_password, &server, server_port).await,
         },
     }
+}
+
+/// Resolve device MAC: use explicit value, autodiscover, or fail.
+async fn resolve_device_mac(mac: Option<String>, autodiscover: bool) -> Result<String> {
+    if let Some(mac) = mac
+        && !mac.is_empty()
+    {
+        return Ok(mac);
+    }
+    if autodiscover {
+        eprintln!("[discover] Auto-discovering device MAC via LAN broadcast...");
+        let dev = lan::discover_with_retry(5, 12).await?;
+        eprintln!("[discover] Using MAC: {}", dev.mac);
+        return Ok(dev.mac);
+    }
+    anyhow::bail!("Either --mac or --autodiscover is required")
 }
 
 async fn cmd_login(email: &str, password: &str) -> Result<()> {
