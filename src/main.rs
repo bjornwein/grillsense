@@ -431,8 +431,9 @@ async fn cmd_cloud_monitor(
     let mut client = cloud::CloudClient::new()?;
     client.set_device_mac(mac.to_string());
 
+    // Use the derived device ID as canonical MQTT identifier (consistent with local mode)
+    let dev_id = client.device_mac().unwrap_or(mac).to_string();
     let unit_label = if fahrenheit { "°F" } else { "°C" };
-    let dev_id = client.device_mac().unwrap_or(mac);
     println!(
         "Monitoring device {} (cloud ID: {}, {}), Ctrl+C to stop...",
         mac, dev_id, unit_label
@@ -450,7 +451,7 @@ async fn cmd_cloud_monitor(
             username: mqtt_user,
             password: mqtt_pass,
             device_name: device_name.to_string(),
-            device_id: mac.to_string(),
+            device_id: dev_id.clone(),
             poll_interval: Duration::from_secs(interval),
         };
         Some(config)
