@@ -2,7 +2,7 @@
 
 <img src="doc/thermometer.png" alt="Dangrill WiFi BBQ Thermometer" width="200" align="right">
 
-Open-source Rust CLI for the GrillSense / Dangrill / Ezon WiFi BBQ thermometer.
+Open-source Rust CLI for the GrillSense / Dangrill / Ezon / Prograde WiFi BBQ thermometer.
 Reverse-engineered from the Android app — no vendor cloud required.
 
 ## What it does
@@ -212,7 +212,7 @@ MQTT discovery.
 
 ## Hardware
 
-- **Thermometer**: Dangrill / GrillSense / Ezon WiFi BBQ (2-channel)
+- **Thermometer**: Dangrill / GrillSense / Ezon / Prograde WiFi BBQ (2-channel)
 - **WiFi module**: Hi-Flying HF-LPT230, firmware v4.12.17
 - **Connectivity**: BLE 4.0 (provisioning) + WiFi 802.11 b/g/n (data)
 - **Cloud**: `smartserver.emaxtime.cn` (Hong Kong)
