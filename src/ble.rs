@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 /// BLE provisioning for the GrillSense thermometer.
 ///
-/// Uses the btleplug crate to scan for and configure the device via BLE.
 /// The device advertises as "Thermo-typ*" and accepts AT commands over
 /// GATT characteristic fff3 (write), with responses on fff1 (notify).
 ///
-/// NOTE: This module requires the `ble` feature and the btleplug crate.
-/// It is structured as a standalone module that can be enabled later.
+/// This module contains data structures that work without btleplug,
+/// plus the actual BLE runtime (scan/connect/provision) behind the `ble` feature.
 use crate::protocol::ble::*;
 
 /// BLE provisioning configuration.
@@ -119,11 +118,7 @@ impl ProvisionStep {
 
     /// Extract the MAC address from a GetMac response ("+ok=AA:BB:CC:DD:EE:FF").
     pub fn parse_mac_response(response: &str) -> Option<String> {
-        if response.starts_with("+ok=") {
-            Some(response.strip_prefix("+ok=").unwrap().to_string())
-        } else {
-            None
-        }
+        response.strip_prefix("+ok=").map(|s| s.to_string())
     }
 }
 
@@ -153,6 +148,231 @@ pub fn print_provision_sequence(config: &ProvisionConfig) {
         }
         step = step.next();
         n += 1;
+    }
+}
+
+// ── BLE runtime (requires btleplug) ──────────────────────────────────────
+
+#[cfg(feature = "ble")]
+pub mod runtime {
+    use super::*;
+    use anyhow::{Context, Result};
+    use btleplug::api::{
+        Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    };
+    use btleplug::platform::{Adapter, Manager, Peripheral};
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    const SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+    const STEP_TIMEOUT: Duration = Duration::from_secs(5);
+    const STEP_RETRIES: usize = 3;
+    const INTER_STEP_DELAY: Duration = Duration::from_millis(500);
+
+    const SERVICE: uuid::Uuid = uuid::Uuid::from_u128(0x0000fff0_0000_1000_8000_00805f9b34fb);
+    const NOTIFY_CHAR: uuid::Uuid = uuid::Uuid::from_u128(0x0000fff1_0000_1000_8000_00805f9b34fb);
+    const WRITE_CHAR: uuid::Uuid = uuid::Uuid::from_u128(0x0000fff3_0000_1000_8000_00805f9b34fb);
+
+    async fn get_adapter() -> Result<Adapter> {
+        let manager = Manager::new()
+            .await
+            .context("Failed to create BLE manager")?;
+        let adapters = manager.adapters().await.context("No BLE adapters found")?;
+        adapters
+            .into_iter()
+            .next()
+            .context("No BLE adapter available")
+    }
+
+    fn find_characteristic(
+        chars: &std::collections::BTreeSet<Characteristic>,
+        uuid: uuid::Uuid,
+    ) -> Result<Characteristic> {
+        chars
+            .iter()
+            .find(|c| c.uuid == uuid)
+            .cloned()
+            .with_context(|| format!("Characteristic {uuid} not found"))
+    }
+
+    /// Scan for GrillSense devices. Returns list of (name, address, peripheral).
+    pub async fn scan() -> Result<Vec<(String, String, Peripheral)>> {
+        let adapter = get_adapter().await?;
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![SERVICE],
+            })
+            .await
+            .context("Failed to start BLE scan")?;
+
+        println!("Scanning for BLE devices ({SCAN_TIMEOUT:?})...");
+        tokio::time::sleep(SCAN_TIMEOUT).await;
+        adapter.stop_scan().await?;
+
+        let mut found = Vec::new();
+        for p in adapter.peripherals().await? {
+            if let Some(props) = p.properties().await? {
+                let name = props.local_name.unwrap_or_default();
+                if name.starts_with(DEVICE_NAME_PREFIX) {
+                    let addr = props.address.to_string();
+                    found.push((name, addr, p));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Run the full provisioning sequence on a discovered peripheral.
+    pub async fn provision(
+        peripheral: &Peripheral,
+        config: &ProvisionConfig,
+    ) -> Result<Option<String>> {
+        println!("Connecting...");
+        peripheral
+            .connect()
+            .await
+            .context("Failed to connect to device")?;
+        println!("Connected, discovering services...");
+        peripheral
+            .discover_services()
+            .await
+            .context("Service discovery failed")?;
+
+        let chars = peripheral.characteristics();
+        let write_char = find_characteristic(&chars, WRITE_CHAR)?;
+        let notify_char = find_characteristic(&chars, NOTIFY_CHAR)?;
+
+        // Subscribe to notifications
+        peripheral
+            .subscribe(&notify_char)
+            .await
+            .context("Failed to subscribe to notifications")?;
+        let mut notifications = peripheral.notifications().await?;
+
+        println!("Starting provisioning sequence...\n");
+
+        let mut step = ProvisionStep::EnterAtMode;
+        let mut step_num = 1u8;
+        let mut mac_address: Option<String> = None;
+
+        while step != ProvisionStep::Done {
+            let packets = packets_for_step(step, config);
+            let cmd_display = step.command(config).unwrap_or_default();
+
+            // Mask password in display
+            let display = if step == ProvisionStep::SetPassword && !config.wifi_password.is_empty()
+            {
+                format!(
+                    "AT+WSKEY=WPA2PSK,AES,{}",
+                    "*".repeat(config.wifi_password.len())
+                )
+            } else {
+                cmd_display.clone()
+            };
+
+            let mut success = false;
+            for attempt in 1..=STEP_RETRIES {
+                if attempt > 1 {
+                    println!("  Retry {attempt}/{STEP_RETRIES}...");
+                } else {
+                    println!("Step {step_num}: {step:?}");
+                    println!(
+                        "  Sending: \"{display}\" ({} chunk{})",
+                        packets.len(),
+                        if packets.len() == 1 { "" } else { "s" }
+                    );
+                }
+
+                // Write all chunks
+                for chunk in &packets {
+                    peripheral
+                        .write(&write_char, chunk, WriteType::WithResponse)
+                        .await
+                        .with_context(|| format!("BLE write failed at step {step:?}"))?;
+                    // Small delay between chunks
+                    if packets.len() > 1 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+
+                // Wait for notification response
+                match tokio::time::timeout(STEP_TIMEOUT, notifications.next()).await {
+                    Ok(Some(notification)) => {
+                        let response = String::from_utf8_lossy(&notification.value);
+                        let response = response.trim();
+                        println!("  Response: \"{response}\"");
+
+                        if step.is_success_response(response) {
+                            if step == ProvisionStep::GetMac {
+                                mac_address = ProvisionStep::parse_mac_response(response);
+                                if let Some(ref mac) = mac_address {
+                                    println!("  Device MAC: {mac}");
+                                }
+                            }
+                            success = true;
+                            break;
+                        } else {
+                            eprintln!("  Unexpected response, retrying...");
+                        }
+                    }
+                    Ok(None) => {
+                        eprintln!("  Notification stream ended");
+                    }
+                    Err(_) => {
+                        eprintln!("  Timeout ({STEP_TIMEOUT:?}), no response");
+                    }
+                }
+            }
+
+            if !success {
+                // Disconnect before returning error
+                let _ = peripheral.disconnect().await;
+                anyhow::bail!("Step {step:?} failed after {STEP_RETRIES} attempts");
+            }
+
+            println!();
+            step = step.next();
+            step_num += 1;
+
+            if step != ProvisionStep::Done {
+                tokio::time::sleep(INTER_STEP_DELAY).await;
+            }
+        }
+
+        let _ = peripheral.disconnect().await;
+        println!("Provisioning complete!");
+        Ok(mac_address)
+    }
+
+    /// Scan for a device and provision it in one call.
+    pub async fn scan_and_provision(config: &ProvisionConfig) -> Result<()> {
+        let devices = scan().await?;
+
+        if devices.is_empty() {
+            anyhow::bail!("No GrillSense devices found via BLE scan");
+        }
+
+        println!("\nFound {} device(s):", devices.len());
+        for (i, (name, addr, _)) in devices.iter().enumerate() {
+            println!("  [{i}] {name} ({addr})");
+        }
+        println!();
+
+        // Use first device
+        let (ref name, ref addr, ref peripheral) = devices[0];
+        println!("Provisioning {name} ({addr})...\n");
+        print_provision_sequence(config);
+        println!();
+
+        let mac = provision(peripheral, config).await?;
+        if let Some(mac) = mac {
+            let device_id = crate::protocol::wifi_mac_to_device_id(&mac);
+            println!("\nDevice MAC:  {mac}");
+            println!("Device ID:   {device_id}");
+            println!("Server:      {}:{}", config.server_host, config.server_port);
+        }
+
+        Ok(())
     }
 }
 

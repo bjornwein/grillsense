@@ -218,6 +218,27 @@ enum LocalCommands {
         #[arg(long)]
         ch2: Option<f64>,
     },
+
+    /// Scan for GrillSense devices via BLE (requires --features ble)
+    #[cfg(feature = "ble")]
+    Scan,
+
+    /// Provision a GrillSense device via BLE (requires --features ble)
+    #[cfg(feature = "ble")]
+    Provision {
+        /// WiFi SSID
+        #[arg(short, long)]
+        ssid: String,
+        /// WiFi password (empty for open networks)
+        #[arg(short = 'P', long, default_value = "")]
+        wifi_password: String,
+        /// Server hostname or IP to send temperature data to
+        #[arg(long, default_value = "smartserver.emaxtime.cn")]
+        server: String,
+        /// Server UDP port
+        #[arg(long, default_value = "17000")]
+        server_port: u16,
+    },
 }
 
 #[tokio::main]
@@ -318,6 +339,15 @@ async fn main() -> Result<()> {
                 .await
             }
             LocalCommands::SetAlarm { port, ch1, ch2 } => cmd_local_set_alarm(port, ch1, ch2).await,
+            #[cfg(feature = "ble")]
+            LocalCommands::Scan => cmd_ble_scan().await,
+            #[cfg(feature = "ble")]
+            LocalCommands::Provision {
+                ssid,
+                wifi_password,
+                server,
+                server_port,
+            } => cmd_ble_provision(&ssid, &wifi_password, &server, server_port).await,
         },
     }
 }
@@ -1147,4 +1177,58 @@ fn chrono_lite_now() -> String {
     let mins = (secs / 60) % 60;
     let s = secs % 60;
     format!("{hours:02}:{mins:02}:{s:02}")
+}
+
+// ---------- BLE commands ----------
+
+#[cfg(feature = "ble")]
+async fn cmd_ble_scan() -> Result<()> {
+    let devices = ble::runtime::scan().await?;
+
+    if devices.is_empty() {
+        println!("No GrillSense devices found via BLE.");
+        println!("Make sure:");
+        println!("  - The device is powered on and NOT connected to WiFi");
+        println!("  - You are within BLE range (~10m)");
+        println!("  - Bluetooth is enabled on this machine");
+        return Ok(());
+    }
+
+    println!("\nFound {} device(s):", devices.len());
+    for (name, addr, _) in &devices {
+        println!("  {name} ({addr})");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ble")]
+async fn cmd_ble_provision(
+    ssid: &str,
+    wifi_password: &str,
+    server: &str,
+    server_port: u16,
+) -> Result<()> {
+    let config = if server == protocol::CLOUD_HOST {
+        ble::ProvisionConfig::cloud_default(ssid.to_string(), wifi_password.to_string())
+    } else {
+        ble::ProvisionConfig::local(
+            ssid.to_string(),
+            wifi_password.to_string(),
+            server.to_string(),
+            server_port,
+        )
+    };
+
+    println!("GrillSense BLE Provisioning");
+    println!("===========================");
+    println!("  SSID:   {ssid}");
+    println!("  Server: {server}:{server_port}");
+    println!();
+
+    ble::runtime::scan_and_provision(&config).await?;
+
+    println!();
+    println!("The device will now reboot and connect to the configured WiFi.");
+    println!("Temperature data will be sent to {server}:{server_port}.");
+    Ok(())
 }
