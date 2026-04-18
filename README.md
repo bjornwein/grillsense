@@ -1,5 +1,7 @@
 # GrillSense
 
+<img src="doc/thermometer.png" alt="Dangrill WiFi BBQ Thermometer" width="200" align="right">
+
 Open-source Rust CLI for the GrillSense / Dangrill / Ezon WiFi BBQ thermometer.
 Reverse-engineered from the Android app — no vendor cloud required.
 
