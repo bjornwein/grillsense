@@ -816,9 +816,7 @@ async fn cmd_local_monitor(
         // Skip alarm packets — echoing them creates a loop where the device
         // re-acknowledges the echo, generating infinite alarm traffic.
         let is_alarm = protocol::udp::parse_alarm_packet(data).is_some();
-        if !is_alarm
-            && let Some(echo) = build_echo(data)
-        {
+        if !is_alarm && let Some(echo) = build_echo(data) {
             let _ = sock.send_to(&echo, addr).await;
         }
 
