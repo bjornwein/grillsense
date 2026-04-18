@@ -492,8 +492,7 @@ async fn cmd_cloud_monitor(
                             .join(" | ")
                     };
                     let age = format_age(&temp);
-                    print!("\r\x1b[2K[{now}] {online} | {channels}{age}");
-                    io::stdout().flush().ok();
+                    println!("[{now}] {online} | {channels}{age}");
                 }
                 tokio::time::sleep(interval_dur).await;
             }
