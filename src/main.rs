@@ -1228,7 +1228,11 @@ async fn cmd_ble_provision(
     ble::runtime::scan_and_provision(&config).await?;
 
     println!();
-    println!("The device will now reboot and connect to the configured WiFi.");
+    println!("Provisioning complete. Settings saved to flash.");
+    println!();
+    println!("⚠️  If the device was in AP mode, you must POWER CYCLE it.");
+    println!("   (AT+Z cannot exit AP mode — this is a hardware limitation.)");
+    println!();
     println!("Temperature data will be sent to {server}:{server_port}.");
     Ok(())
 }

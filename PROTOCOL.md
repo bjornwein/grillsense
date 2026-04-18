@@ -151,12 +151,22 @@ The `AT+WSKEY` command uses the format: `<auth>,<encryption>,<password>`
 
 When not yet provisioned (or after factory reset), the device runs as a WiFi AP:
 
-- **SSID**: `LivingSmart`
+- **SSID**: `LivingSmart` (open, no password)
 - **Security**: Open (no password)
 - **IP**: `10.10.100.254`
-- **UDP Port**: `48899` (AT commands) / `8800` (legacy)
 
-### AP Mode Reconfiguration
+### Device Model Variants
+
+The official app supports two hardware models with different AP mode protocols:
+
+| Model | AP IP         | AP Port | Protocol          | Exit Method               |
+|-------|---------------|---------|-------------------|---------------------------|
+| G001  | 11.11.11.254  | 8800    | `LSD_WIFI:` prefix | `LSD_WIFI:AT+WMODE=STA` → `LSD_WIFI:AT+Z` |
+| G002  | 10.10.100.254 | 48899   | HF-A11 AT commands | `AT+WMODE=STA` → `AT+Z`  |
+
+The Dangrill unit is **G002** (uses `10.10.100.254:48899` with standard HF-A11 AT protocol).
+
+### G002 AP Mode Reconfiguration
 
 Connect to the `LivingSmart` WiFi network, then send AT commands to
 `10.10.100.254:48899`:
@@ -169,21 +179,37 @@ Connect to the `LivingSmart` WiFi network, then send AT commands to
 | 4    | `AT+WSKEY=WPA2PSK,AES,<password>`                  | `+ok`                 | Set WiFi key                   |
 | 5    | `AT+NETP=UDP,CLIENT,17000,smartserver.emaxtime.cn` | `+ok`                 | Set cloud endpoint             |
 | 6    | `AT+WMODE=STA`                                     | `+ok`                 | Set station mode               |
-| 7    | `AT+Z`                                             | `+ok`                 | Reboot (preserves settings)    |
+| 7    | `AT+CFGTF`                                         | `+ok`                 | Save config to flash           |
+| 8    | `AT+Z`                                             | `+ok`                 | Reboot                         |
 
-### AP Mode BLE-bridged Commands
+**⚠️ AP mode limitation**: `AT+Z` does not reliably reboot the device from AP mode.
+The HF-LPT230 firmware ignores software reset when in AP mode. A **power cycle** is
+required after AP-mode provisioning. The official Android app shows a "restarting" toast
+but the device behaviour is the same — it requires a power cycle.
 
-When using BLE-to-WiFi bridge mode, commands are prefixed with `LSD_WIFI:`:
+### G001 AP Mode Protocol (`LSD_WIFI`)
 
-| Command                                            | Purpose                    |
-|----------------------------------------------------|----------------------------|
-| `LSD_WIFI`                                         | Initiate BLE-WiFi bridge   |
-| `LSD_WIFI:AT+WSSSID=<ssid>`                       | Set WiFi SSID              |
-| `LSD_WIFI:AT+WSKEY=<pwd>`                          | Set WiFi password          |
-| `LSD_WIFI:AT+RELD`                                 | Reload/restart             |
-| `LSD_WIFI:AT+WALK`                                 | Walk/scan WiFi             |
-| `LSD_WIFI:AT+NETP=TCP,SERVER,8899,10.10.100.254\r\n` | Set network parameters |
-| `LSD_WIFI:AT+WSMAC`                                | Get MAC address            |
+The G001 model variant uses a different AP mode protocol via UDP on `11.11.11.254:8800`.
+Commands are prefixed with `LSD_WIFI:` and sent as raw UDP datagrams (no AT mode handshake):
+
+| Step | Command Sent              | Expected Response  | Notes                    |
+|------|---------------------------|--------------------|--------------------------|
+| 1    | `LSD_WIFI`               | `<mac>,<info>`     | Initiate connection      |
+| 2    | `<ssid>\r`                | `+ok`              | Set WiFi SSID            |
+| 3    | `<key_string>\r`          | `+ok`              | Set WiFi key             |
+| 4    | `LSD_WIFI:AT+WMODE=STA\r`| `+ok`              | Exit AP, set STA mode    |
+| 5    | `LSD_WIFI:AT+Z\r`        | —                  | Reboot                   |
+
+Other `LSD_WIFI:` prefixed commands observed in the app:
+
+| Command                                               | Purpose                    |
+|-------------------------------------------------------|----------------------------|
+| `LSD_WIFI:AT+WSSSID=<ssid>`                          | Set WiFi SSID              |
+| `LSD_WIFI:AT+WSKEY=<pwd>`                             | Set WiFi password          |
+| `LSD_WIFI:AT+RELD`                                    | Factory reset              |
+| `LSD_WIFI:AT+WALK`                                    | Scan WiFi networks         |
+| `LSD_WIFI:AT+NETP=TCP,SERVER,8899,10.10.100.254\r\n` | Set network parameters     |
+| `LSD_WIFI:AT+WSMAC`                                   | Get MAC address            |
 
 ## Cloud REST API
 
