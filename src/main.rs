@@ -490,7 +490,8 @@ async fn cmd_cloud_monitor(
                             .collect::<Vec<_>>()
                             .join(" | ")
                     };
-                    print!("\r[{now}] {online} | {channels}    ");
+                    let age = format_age(&temp);
+                    print!("\r[{now}] {online} | {channels}{age}    ");
                     io::stdout().flush().ok();
                 }
                 tokio::time::sleep(interval_dur).await;
@@ -528,7 +529,8 @@ async fn cmd_cloud_monitor(
                             .join(" | ")
                     };
 
-                    print!("\r[{now}] {online} | {channels}    ");
+                    let age = format_age(&temp);
+                    print!("\r[{now}] {online} | {channels}{age}    ");
                     io::stdout().flush().context("flush stdout")?;
                 }
                 Err(e) => {
@@ -1177,6 +1179,23 @@ fn chrono_lite_now() -> String {
     let mins = (secs / 60) % 60;
     let s = secs % 60;
     format!("{hours:02}:{mins:02}:{s:02}")
+}
+
+/// Format data age for display. Returns empty string if fresh (< 30s).
+fn format_age(temp: &protocol::TempResult) -> String {
+    match temp.age_secs() {
+        Some(age) if age >= 60 => {
+            let mins = age / 60;
+            let secs = age % 60;
+            if mins >= 60 {
+                format!(" (stale: {}h{}m)", mins / 60, mins % 60)
+            } else {
+                format!(" (stale: {mins}m{secs:02}s)")
+            }
+        }
+        Some(age) if age >= 30 => format!(" (age: {age}s)"),
+        _ => String::new(),
+    }
 }
 
 // ---------- BLE commands ----------

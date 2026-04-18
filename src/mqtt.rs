@@ -172,6 +172,7 @@ impl MqttHaConfig {
             "temperature_ch5": temp.temperature_ch5,
             "temperature_ch6": temp.temperature_ch6,
             "is_online": temp.online(),
+            "data_age_secs": temp.age_secs(),
         }))
         .unwrap()
     }
@@ -253,8 +254,9 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
                 let packet = build_mqtt_publish(&config.state_topic(), payload.as_bytes(), false);
                 stream.write_all(&packet).await?;
 
-                // Also update availability
-                let status = if temp.online() { "online" } else { "offline" };
+                // Also update availability — stale data (>60s) counts as offline
+                let is_fresh = temp.online() && !temp.is_stale(60);
+                let status = if is_fresh { "online" } else { "offline" };
                 let avail =
                     build_mqtt_publish(&config.availability_topic(), status.as_bytes(), true);
                 stream.write_all(&avail).await?;
@@ -528,17 +530,14 @@ mod tests {
             isonline: true,
             time: String::new(),
             temperature_ch1: 72.5,
-            temperature_ch2: 0.0,
-            temperature_ch3: 0.0,
-            temperature_ch4: 0.0,
-            temperature_ch5: 0.0,
-            temperature_ch6: 0.0,
+            ..Default::default()
         };
         let payload = config.state_payload(&temp);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["temperature_ch1"], 72.5);
         assert_eq!(v["temperature_ch2"], 0.0);
         assert_eq!(v["is_online"], true);
+        assert!(v["data_age_secs"].is_null()); // no timestamp → null age
     }
 
     #[test]

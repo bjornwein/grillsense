@@ -340,7 +340,7 @@ pub mod udp {
 use serde::Deserialize;
 
 /// Temperature reading from the cloud API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TempResult {
     #[serde(default)]
     pub is_online: bool,
@@ -366,6 +366,29 @@ impl TempResult {
     /// Check if device is online (handles both field names).
     pub fn online(&self) -> bool {
         self.is_online || self.isonline
+    }
+
+    /// Parse the server timestamp and return age in seconds.
+    /// Returns `None` if the `time` field is empty or unparseable.
+    pub fn age_secs(&self) -> Option<u64> {
+        use std::time::SystemTime;
+
+        if self.time.is_empty() {
+            return None;
+        }
+
+        // Parse RFC 3339 timestamp (e.g. "2026-04-18T17:01:27.991351846+08:00")
+        let ts = parse_rfc3339(&self.time)?;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(now.saturating_sub(ts))
+    }
+
+    /// Returns true if the data is stale (older than the given threshold).
+    pub fn is_stale(&self, max_age_secs: u64) -> bool {
+        self.age_secs().is_some_and(|age| age > max_age_secs)
     }
 
     /// Get all channel temperatures as an array.
@@ -517,6 +540,77 @@ pub fn celsius_to_fahrenheit(c: f64) -> f64 {
 /// Convert Fahrenheit to Celsius.
 pub fn fahrenheit_to_celsius(f: f64) -> f64 {
     ((f - 32.0) * 5.0 / 9.0).round()
+}
+
+/// Parse an RFC 3339 timestamp into Unix epoch seconds.
+///
+/// Handles the format returned by the cloud API:
+/// `"2026-04-18T17:01:27.991351846+08:00"`.
+/// Fractional seconds and timezone offsets are supported.
+fn parse_rfc3339(s: &str) -> Option<u64> {
+    // Split at 'T' to get date and time parts
+    let (date_part, time_with_tz) = s.split_once('T')?;
+
+    // Parse date: YYYY-MM-DD
+    let mut date_iter = date_part.splitn(3, '-');
+    let year: i64 = date_iter.next()?.parse().ok()?;
+    let month: u32 = date_iter.next()?.parse().ok()?;
+    let day: u32 = date_iter.next()?.parse().ok()?;
+
+    // Separate time from timezone offset
+    // Offset can be +HH:MM, -HH:MM, or Z
+    let (time_part, offset_secs) = if let Some(pos) = time_with_tz.rfind('+') {
+        if pos > 0 {
+            let tz = &time_with_tz[pos + 1..];
+            let (h, m) = tz.split_once(':')?;
+            let off: i64 = h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60;
+            (&time_with_tz[..pos], off)
+        } else {
+            return None;
+        }
+    } else if let Some(pos) = time_with_tz.rfind('-') {
+        // Could be the date separator or a negative offset — check position
+        if pos > 6 {
+            let tz = &time_with_tz[pos + 1..];
+            let (h, m) = tz.split_once(':')?;
+            let off: i64 = -(h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60);
+            (&time_with_tz[..pos], off)
+        } else {
+            (time_with_tz.trim_end_matches('Z'), 0)
+        }
+    } else {
+        (time_with_tz.trim_end_matches('Z'), 0)
+    };
+
+    // Parse time: HH:MM:SS[.frac]
+    let time_no_frac = time_part.split('.').next()?;
+    let mut time_iter = time_no_frac.splitn(3, ':');
+    let hour: u32 = time_iter.next()?.parse().ok()?;
+    let min: u32 = time_iter.next()?.parse().ok()?;
+    let sec: u32 = time_iter.next()?.parse().ok()?;
+
+    // Convert to Unix timestamp (days since epoch)
+    // Simplified: valid for years 1970-2099
+    let mut days: i64 = 0;
+    for y in 1970..year {
+        days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 1..month {
+        days += month_days[m as usize] as i64;
+        if m == 2 && leap {
+            days += 1;
+        }
+    }
+    days += day as i64 - 1;
+
+    let epoch = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64 - offset_secs;
+    Some(epoch as u64)
 }
 
 #[cfg(test)]
@@ -766,5 +860,56 @@ mod tests {
             0x00, 0x54, 0x02, 0x6E, 0x37, 0x5B, 0x8C, 0x01, 0x01, 0x01, 0x00, 0x00, 0x21, 0x3E,
         ];
         assert!(udp::build_echo(&data).is_none());
+    }
+
+    #[test]
+    fn test_parse_rfc3339_positive_offset() {
+        // Cloud API format: "2026-04-18T17:01:27.991351846+08:00"
+        let ts = parse_rfc3339("2026-04-18T17:01:27.991351846+08:00").unwrap();
+        // 17:01:27 +08:00 = 09:01:27 UTC
+        let expected = parse_rfc3339("2026-04-18T09:01:27Z").unwrap();
+        assert_eq!(ts, expected);
+    }
+
+    #[test]
+    fn test_parse_rfc3339_utc() {
+        let ts = parse_rfc3339("2026-01-01T00:00:00Z").unwrap();
+        // 2026-01-01 = 56 years after epoch
+        // 1970-2026: need to count days
+        assert!(ts > 0);
+    }
+
+    #[test]
+    fn test_parse_rfc3339_negative_offset() {
+        let ts = parse_rfc3339("2026-04-18T05:01:27-04:00").unwrap();
+        // 05:01:27 -04:00 = 09:01:27 UTC
+        let expected = parse_rfc3339("2026-04-18T09:01:27Z").unwrap();
+        assert_eq!(ts, expected);
+    }
+
+    #[test]
+    fn test_temp_result_staleness() {
+        let temp = TempResult {
+            is_online: false,
+            isonline: true,
+            time: "2020-01-01T00:00:00Z".to_string(),
+            temperature_ch1: 25.0,
+            ..Default::default()
+        };
+        // Data from 2020 is definitely stale
+        assert!(temp.is_stale(60));
+        assert!(temp.age_secs().unwrap() > 86400);
+    }
+
+    #[test]
+    fn test_temp_result_no_time() {
+        let temp = TempResult {
+            is_online: false,
+            isonline: true,
+            time: String::new(),
+            ..Default::default()
+        };
+        assert!(temp.age_secs().is_none());
+        assert!(!temp.is_stale(60));
     }
 }
