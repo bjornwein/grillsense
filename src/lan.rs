@@ -106,11 +106,32 @@ pub async fn send_at_command(ip: &str, command: &str) -> Result<String> {
 
 /// Discover the first GrillSense device on the network, retrying until found.
 ///
-/// Sends broadcast discovery every `interval` seconds, up to `max_attempts` times.
-/// Returns the first device found.
-pub async fn discover_with_retry(interval_secs: u64, max_attempts: u32) -> Result<DeviceDiscovery> {
-    for attempt in 1..=max_attempts {
-        eprintln!("[discover] Broadcast scan attempt {attempt}/{max_attempts}...");
+/// Sends broadcast discovery every `interval` seconds. If `max_attempts` is `None`,
+/// retries forever (suitable for unmonitored services). Log frequency is reduced
+/// after the first 12 attempts to avoid spam.
+pub async fn discover_with_retry(
+    interval_secs: u64,
+    max_attempts: Option<u32>,
+) -> Result<DeviceDiscovery> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+
+        if let Some(max) = max_attempts
+            && attempt > max
+        {
+            anyhow::bail!("No GrillSense device found after {max} discovery attempts");
+        }
+
+        // Reduce log spam: verbose for first 12 attempts, then every 12th
+        let verbose = attempt <= 12 || attempt.is_multiple_of(12);
+        if verbose {
+            match max_attempts {
+                Some(max) => eprintln!("[discover] Broadcast scan attempt {attempt}/{max}..."),
+                None => eprintln!("[discover] Broadcast scan attempt {attempt}..."),
+            }
+        }
+
         match discover_broadcast(interval_secs).await {
             Ok(devices) if !devices.is_empty() => {
                 let dev = devices.into_iter().next().unwrap();
@@ -118,20 +139,19 @@ pub async fn discover_with_retry(interval_secs: u64, max_attempts: u32) -> Resul
                 return Ok(dev);
             }
             Ok(_) => {
-                if attempt < max_attempts {
+                if verbose {
                     eprintln!("[discover] No devices found, retrying in {interval_secs}s...");
-                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
                 }
             }
             Err(e) => {
-                eprintln!("[discover] Scan error: {e}");
-                if attempt < max_attempts {
-                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                if verbose {
+                    eprintln!("[discover] Scan error: {e}");
                 }
             }
         }
+
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
     }
-    anyhow::bail!("No GrillSense device found after {max_attempts} discovery attempts")
 }
 
 /// Send multiple AT commands in a single session.

@@ -177,6 +177,26 @@ impl MqttHaConfig {
     }
 }
 
+/// Run the MQTT-HA bridge with automatic reconnection.
+///
+/// Wraps `run_bridge` in a retry loop — if the MQTT connection drops,
+/// waits 5 seconds and reconnects. Suitable for unmonitored services.
+pub async fn run_bridge_with_reconnect(config: &MqttHaConfig, client: &CloudClient) -> Result<()> {
+    let mut attempts = 0u32;
+    loop {
+        match run_bridge(config, client).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                attempts += 1;
+                let delay = (5 * attempts).min(60);
+                eprintln!("[mqtt] Bridge error: {e}");
+                eprintln!("[mqtt] Reconnecting in {delay}s (attempt {attempts})...");
+                tokio::time::sleep(Duration::from_secs(delay.into())).await;
+            }
+        }
+    }
+}
+
 /// Run the MQTT-HA bridge, polling the cloud API and publishing to MQTT.
 ///
 /// This function uses a simple TCP-based MQTT v3.1.1 implementation to avoid

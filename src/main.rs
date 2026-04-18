@@ -366,7 +366,7 @@ async fn resolve_device_mac(mac: Option<String>, autodiscover: bool) -> Result<S
     }
     if autodiscover {
         eprintln!("[discover] Auto-discovering device MAC via LAN broadcast...");
-        let dev = lan::discover_with_retry(5, 12).await?;
+        let dev = lan::discover_with_retry(5, None).await?;
         eprintln!("[discover] Using MAC: {}", dev.mac);
         return Ok(dev.mac);
     }
@@ -513,7 +513,7 @@ async fn cmd_cloud_monitor(
             }
         });
 
-        mqtt::run_bridge(&config, &client).await
+        mqtt::run_bridge_with_reconnect(&config, &client).await
     } else {
         // Console-only monitoring
         let interval_dur = Duration::from_secs(interval);
@@ -549,14 +549,10 @@ async fn cmd_cloud_monitor(
                 }
                 Err(e) => {
                     consecutive_errors += 1;
-                    eprint!(
-                        "\r[error] {} (attempt {})                ",
-                        e, consecutive_errors
-                    );
-                    io::stderr().flush().ok();
-                    if consecutive_errors >= 10 {
-                        println!();
-                        return Err(e.context("Too many consecutive errors"));
+                    // Reduce log spam: verbose for first 10, then every 10th
+                    if consecutive_errors <= 10 || consecutive_errors.is_multiple_of(10) {
+                        eprint!("\r[error] {} (×{})                ", e, consecutive_errors);
+                        io::stderr().flush().ok();
                     }
                 }
             }
