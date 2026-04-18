@@ -62,10 +62,11 @@ All three modes share the same MQTT publishing pattern: HA auto-discovery, alarm
 
 1. Bump version in `Cargo.toml`
 2. Run `cargo update` to regenerate `Cargo.lock`
-3. Commit and push to master
-4. Create a GitHub release (triggers the deploy pipeline):
+3. **Run `cargo fmt`, `cargo clippy`, and `cargo test`** — CI checks these on push
+4. Commit and push to master
+5. Create a GitHub release (triggers the deploy pipeline):
    ```
-   gh release create v0.1.9 --title "v0.1.9" --notes "..."
+   gh release create v0.1.10 --title "v0.1.10" --notes "..."
    ```
 
 The deploy workflow handles everything else automatically:
