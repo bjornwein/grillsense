@@ -496,6 +496,7 @@ dependencies = [
  "btleplug",
  "clap",
  "futures",
+ "libc",
  "md-5",
  "reqwest",
  "serde",

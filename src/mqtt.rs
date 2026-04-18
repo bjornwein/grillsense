@@ -182,10 +182,14 @@ impl MqttHaConfig {
 ///
 /// Wraps `run_bridge` in a retry loop — if the MQTT connection drops,
 /// waits 5 seconds and reconnects. Suitable for unmonitored services.
-pub async fn run_bridge_with_reconnect(config: &MqttHaConfig, client: &CloudClient) -> Result<()> {
+pub async fn run_bridge_with_reconnect(
+    config: &MqttHaConfig,
+    client: &CloudClient,
+    display_tx: Option<tokio::sync::mpsc::Sender<crate::protocol::TempResult>>,
+) -> Result<()> {
     let mut attempts = 0u32;
     loop {
-        match run_bridge(config, client).await {
+        match run_bridge(config, client, display_tx.clone()).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 attempts += 1;
@@ -203,7 +207,11 @@ pub async fn run_bridge_with_reconnect(config: &MqttHaConfig, client: &CloudClie
 /// Subscribes to alarm command topics and forwards setpoints to the cloud API.
 /// This function uses a simple TCP-based MQTT v3.1.1 implementation to avoid
 /// pulling in a full MQTT crate. For production use, consider rumqttc.
-pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<()> {
+pub async fn run_bridge(
+    config: &MqttHaConfig,
+    client: &CloudClient,
+    display_tx: Option<tokio::sync::mpsc::Sender<crate::protocol::TempResult>>,
+) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -292,13 +300,20 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
     // Main loop: poll temperature, handle alarm commands, keepalive
     let mut poll_interval = tokio::time::interval(config.poll_interval);
     poll_interval.tick().await; // consume immediate first tick
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
             _ = poll_interval.tick() => {
                 match client.get_temperature().await {
                     Ok(temp) => {
-                        let mut payload = serde_json::json!({
+                        // Forward to display task if connected
+                        if let Some(ref tx) = display_tx {
+                            let _ = tx.try_send(temp.clone());
+                        }
+
+                        let payload = serde_json::json!({
                             "temperature_ch1": temp.temperature_ch1,
                             "temperature_ch2": temp.temperature_ch2,
                             "temperature_ch3": temp.temperature_ch3,
@@ -307,14 +322,9 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
                             "temperature_ch6": temp.temperature_ch6,
                             "is_online": temp.online(),
                             "data_age_secs": temp.age_secs(),
+                            "alarm_ch1": alarm_ch1,
+                            "alarm_ch2": alarm_ch2,
                         });
-                        // Include alarm setpoints if set
-                        if alarm_ch1 > 0.0 {
-                            payload["alarm_ch1"] = serde_json::json!(alarm_ch1);
-                        }
-                        if alarm_ch2 > 0.0 {
-                            payload["alarm_ch2"] = serde_json::json!(alarm_ch2);
-                        }
                         let state = serde_json::to_string(&payload).unwrap();
                         let packet = build_mqtt_publish(&config.state_topic(), state.as_bytes(), false);
                         writer.write_all(&packet).await?;
@@ -329,8 +339,8 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
                         eprintln!("Temperature poll error: {e}");
                     }
                 }
-
-                // Send PINGREQ to keep connection alive
+            }
+            _ = ping_interval.tick() => {
                 writer.write_all(&[0xC0, 0x00]).await?;
             }
             cmd = alarm_rx.recv() => {

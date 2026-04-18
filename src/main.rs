@@ -461,44 +461,36 @@ async fn cmd_cloud_monitor(
 
     // If MQTT is enabled, delegate to the existing MQTT bridge
     if let Some(config) = mqtt_config {
-        // Spawn a display task that also polls + prints to console
-        let display_client = {
-            let mut c = cloud::CloudClient::new()?;
-            c.set_device_mac(mac.to_string());
-            c
-        };
-        let interval_dur = Duration::from_secs(interval);
+        // Bridge sends temp data to display task via channel (avoids double-polling)
+        let (display_tx, mut display_rx) = tokio::sync::mpsc::channel::<protocol::TempResult>(4);
         tokio::spawn(async move {
-            loop {
-                if let Ok(temp) = display_client.get_temperature().await {
-                    let online = if temp.online() { "online" } else { "OFFLINE" };
-                    let now = chrono_lite_now();
-                    let active = temp.active_channels();
-                    let channels: String = if active.is_empty() {
-                        "no probes connected".to_string()
-                    } else {
-                        active
-                            .iter()
-                            .map(|(ch, t)| {
-                                let v = if fahrenheit {
-                                    protocol::celsius_to_fahrenheit(*t)
-                                } else {
-                                    *t
-                                };
-                                let unit = if fahrenheit { "°F" } else { "°C" };
-                                format!("CH{ch}: {v:.1}{unit}")
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" | ")
-                    };
-                    let age = format_age(&temp);
-                    println!("[{now}] {online} | {channels}{age}");
-                }
-                tokio::time::sleep(interval_dur).await;
+            while let Some(temp) = display_rx.recv().await {
+                let online = if temp.online() { "online" } else { "OFFLINE" };
+                let now = chrono_lite_now();
+                let active = temp.active_channels();
+                let channels: String = if active.is_empty() {
+                    "no probes connected".to_string()
+                } else {
+                    active
+                        .iter()
+                        .map(|(ch, t)| {
+                            let v = if fahrenheit {
+                                protocol::celsius_to_fahrenheit(*t)
+                            } else {
+                                *t
+                            };
+                            let unit = if fahrenheit { "°F" } else { "°C" };
+                            format!("CH{ch}: {v:.1}{unit}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                let age = format_age(&temp);
+                println!("[{now}] {online} | {channels}{age}");
             }
         });
 
-        mqtt::run_bridge_with_reconnect(&config, &client).await
+        mqtt::run_bridge_with_reconnect(&config, &client, Some(display_tx)).await
     } else {
         // Console-only monitoring
         let interval_dur = Duration::from_secs(interval);
@@ -855,7 +847,7 @@ async fn cmd_local_monitor(
                 .iter()
                 .map(|(ch, t)| {
                     let val = if fahrenheit {
-                        *t * 9.0 / 5.0 + 32.0
+                        protocol::celsius_to_fahrenheit(*t)
                     } else {
                         *t
                     };
@@ -1185,11 +1177,12 @@ fn chrono_lite_now() -> String {
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = dur.as_secs();
-    let hours = (secs / 3600) % 24;
-    let mins = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{hours:02}:{mins:02}:{s:02}")
+    let secs = dur.as_secs() as i64;
+
+    // Use libc to get local time with timezone offset
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe { libc::localtime_r(&secs as *const i64 as *const libc::time_t, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 /// Format data age for display. Returns empty string if fresh (< 30s).

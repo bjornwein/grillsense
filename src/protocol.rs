@@ -36,6 +36,9 @@ pub mod ble {
     ///
     /// Returns a Vec of byte vectors, each ≤20 bytes, suitable for GATT writes.
     /// `append_crlf` should be true for AT commands (steps 3+), false for steps 1-2.
+    ///
+    /// # Panics
+    /// Panics if the command exceeds 54 bytes (3 chunks × 18 payload bytes).
     pub fn frame_command(cmd: &str, append_crlf: bool) -> Vec<Vec<u8>> {
         let data = if append_crlf {
             format!("{cmd}\r\n")
@@ -43,8 +46,13 @@ pub mod ble {
             cmd.to_string()
         };
         let bytes = data.as_bytes();
-        let total_chunks = bytes.len().div_ceil(MAX_CHUNK_PAYLOAD);
-        let total_chunks = total_chunks.min(3) as u8;
+        assert!(
+            bytes.len() <= MAX_CHUNK_PAYLOAD * 3,
+            "BLE command too long ({} bytes, max {}): {cmd}",
+            bytes.len(),
+            MAX_CHUNK_PAYLOAD * 3
+        );
+        let total_chunks = bytes.len().div_ceil(MAX_CHUNK_PAYLOAD) as u8;
 
         let mut chunks = Vec::new();
         for i in 0..total_chunks {
