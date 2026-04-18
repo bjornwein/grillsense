@@ -334,7 +334,10 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
                 writer.write_all(&[0xC0, 0x00]).await?;
             }
             cmd = alarm_rx.recv() => {
-                let Some((channel, temp_c)) = cmd else { break };
+                let Some((channel, temp_c)) = cmd else {
+                    // Reader task exited — MQTT connection lost
+                    anyhow::bail!("MQTT reader task exited — connection lost");
+                };
                 eprintln!("[mqtt] Alarm command: CH{channel} = {temp_c:.1}°C");
                 match client.set_alarm_temp(channel, temp_c).await {
                     Ok(()) => {
@@ -352,8 +355,6 @@ pub async fn run_bridge(config: &MqttHaConfig, client: &CloudClient) -> Result<(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Build a minimal MQTT v3.1.1 CONNECT packet.
