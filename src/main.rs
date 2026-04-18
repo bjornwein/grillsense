@@ -1041,9 +1041,10 @@ async fn mqtt_proxy_publisher(
     let mut device_addr: Option<std::net::SocketAddr> = None;
     let mut device_id_bytes: Option<[u8; 5]> = None;
 
-    // Track current alarm setpoints for state publishing
-    let mut alarm_ch1: f64 = 0.0;
-    let mut alarm_ch2: f64 = 0.0;
+    // Track current alarm setpoints for state publishing.
+    // Load persisted values so alarms survive process restarts.
+    let alarm_state_path = alarm_state_file();
+    let (mut alarm_ch1, mut alarm_ch2) = load_alarm_state(&alarm_state_path);
 
     // Split TCP stream for concurrent read/write
     let (reader, mut writer) = stream.into_split();
@@ -1152,6 +1153,23 @@ async fn mqtt_proxy_publisher(
                         );
                         writer.write_all(&avail).await?;
                         device_online = true;
+
+                        // Re-push alarm setpoints on (re)connect so the device
+                        // recovers HA-set alarms after a power cycle.
+                        if let (Some(addr), Some(id_bytes)) = (device_addr, device_id_bytes) {
+                            if alarm_ch1 > 0.0 {
+                                let pkt = protocol::udp::build_alarm_packet(&id_bytes, 1, alarm_ch1);
+                                if alarm_sock.send_to(&pkt, addr).await.is_ok() {
+                                    println!("[mqtt] Re-pushed alarm CH1={alarm_ch1:.1}°C to device");
+                                }
+                            }
+                            if alarm_ch2 > 0.0 {
+                                let pkt = protocol::udp::build_alarm_packet(&id_bytes, 2, alarm_ch2);
+                                if alarm_sock.send_to(&pkt, addr).await.is_ok() {
+                                    println!("[mqtt] Re-pushed alarm CH2={alarm_ch2:.1}°C to device");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1190,6 +1208,7 @@ async fn mqtt_proxy_publisher(
                                 2 => alarm_ch2 = temp_c,
                                 _ => {}
                             }
+                            save_alarm_state(&alarm_state_path, alarm_ch1, alarm_ch2);
                         }
                         Err(e) => eprintln!("[mqtt] Failed to send alarm to device: {e}"),
                     }
@@ -1231,6 +1250,52 @@ fn format_age(temp: &protocol::TempResult) -> String {
         }
         Some(age) if age >= 30 => format!(" (age: {age}s)"),
         _ => String::new(),
+    }
+}
+
+// ---------- Alarm state persistence (local mode) ----------
+
+/// Return the path for persisting alarm setpoints.
+/// Uses `/data/alarms.json` if it exists (HA add-on), otherwise
+/// `$XDG_DATA_HOME/grillsense/alarms.json` (standalone).
+fn alarm_state_file() -> std::path::PathBuf {
+    let ha_dir = std::path::Path::new("/data");
+    if ha_dir.is_dir() {
+        return ha_dir.join("alarms.json");
+    }
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            std::path::PathBuf::from(home).join(".local/share")
+        });
+    base.join("grillsense").join("alarms.json")
+}
+
+/// Load persisted alarm setpoints. Returns (0.0, 0.0) if file doesn't exist.
+fn load_alarm_state(path: &std::path::Path) -> (f64, f64) {
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return (0.0, 0.0);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return (0.0, 0.0);
+    };
+    let ch1 = v["alarm_ch1"].as_f64().unwrap_or(0.0);
+    let ch2 = v["alarm_ch2"].as_f64().unwrap_or(0.0);
+    if ch1 > 0.0 || ch2 > 0.0 {
+        println!("[mqtt] Loaded persisted alarms: CH1={ch1:.1}°C, CH2={ch2:.1}°C");
+    }
+    (ch1, ch2)
+}
+
+/// Save alarm setpoints to disk.
+fn save_alarm_state(path: &std::path::Path, ch1: f64, ch2: f64) {
+    let json = serde_json::json!({ "alarm_ch1": ch1, "alarm_ch2": ch2 });
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Err(e) = std::fs::write(path, json.to_string()) {
+        eprintln!("[mqtt] Failed to persist alarm state: {e}");
     }
 }
 
