@@ -361,14 +361,22 @@ Error Response:
 - **6 temperature channels** (not 2 as originally assumed)
 - `temperature_chN`: Probe N temperature in **Celsius**
 - `isonline`: Whether the device is currently connected
-- `time`: Server timestamp (CST/UTC+8)
+- `time`: Server timestamp of last received data from device (RFC 3339, UTC+8).
+  This value **freezes** when the device goes offline — use it to detect stale data.
 - Values of `0` mean no probe connected
+
+**Staleness behavior:**
+- `isonline` remains `true` for up to **10 minutes** after the device powers off
+- The `time` field stops updating immediately when the device stops sending
+- After exactly 10 minutes, the server returns **error 101** instead of temperature data
+- To detect stale data before the 10-minute cutoff, compare `time` to current wall clock
 
 **Known error codes:**
 
-| Code | Message (Chinese)  | Meaning                |
-|------|--------------------|------------------------|
-| 102  | 设备不存在          | Device does not exist  |
+| Code | Message (Chinese)  | Meaning                          |
+|------|--------------------|----------------------------------|
+| 101  | (unknown)          | Device offline (>10 min timeout) |
+| 102  | 设备不存在          | Device does not exist            |
 
 **Note:** The `devmac` parameter format may vary. Use `idev/list` to see the
 exact MAC format the server expects for your device.

@@ -512,6 +512,8 @@ impl ApiError {
 
 /// Known cloud API error codes.
 pub mod error_codes {
+    /// Device offline — server stops serving data after ~10 minutes.
+    pub const DEVICE_OFFLINE: &str = "101";
     /// Device does not exist (设备不存在).
     pub const DEVICE_NOT_FOUND: &str = "102";
 }
