@@ -61,9 +61,6 @@ enum CloudCommands {
         /// Auto-discover device MAC via LAN broadcast
         #[arg(long)]
         autodiscover: bool,
-        /// Auth token (optional — not needed for temperature reads)
-        #[arg(short, long, default_value = "")]
-        token: String,
         /// Polling interval in seconds
         #[arg(short, long, default_value = "3")]
         interval: u64,
@@ -92,9 +89,6 @@ enum CloudCommands {
 
     /// Set alarm temperature on the cloud server
     SetAlarm {
-        /// Auth token (from login)
-        #[arg(short, long)]
-        token: String,
         /// Device MAC address
         #[arg(short, long)]
         mac: String,
@@ -253,7 +247,6 @@ async fn main() -> Result<()> {
             CloudCommands::Login { email, password } => cmd_login(&email, &password).await,
             CloudCommands::Devices { token } => cmd_devices(&token).await,
             CloudCommands::Monitor {
-                token,
                 mac,
                 autodiscover,
                 interval,
@@ -267,7 +260,6 @@ async fn main() -> Result<()> {
             } => {
                 let resolved_mac = resolve_device_mac(mac, autodiscover).await?;
                 cmd_cloud_monitor(
-                    &token,
                     &resolved_mac,
                     interval,
                     fahrenheit,
@@ -280,9 +272,7 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            CloudCommands::SetAlarm { token, mac, temp } => {
-                cmd_cloud_set_alarm(&token, &mac, temp).await
-            }
+            CloudCommands::SetAlarm { mac, temp } => cmd_cloud_set_alarm(&mac, temp).await,
         },
         Commands::Local { command } => match command {
             LocalCommands::Discover { ip, timeout: t } => cmd_discover(ip.as_deref(), t).await,
@@ -383,7 +373,7 @@ async fn cmd_login(email: &str, password: &str) -> Result<()> {
     println!("  Email:    {}", user.email);
     println!("  Token:    {}", user.token);
     println!();
-    println!("Use this token with other commands:");
+    println!("Use this token to list devices:");
     println!("  grillsense cloud devices --token {}", user.token);
 
     Ok(())
@@ -420,10 +410,7 @@ async fn cmd_devices(token: &str) -> Result<()> {
     if devices.len() == 1 {
         println!();
         println!("Monitor this device:");
-        println!(
-            "  grillsense cloud monitor --token {} --mac {}",
-            token, devices[0].mac
-        );
+        println!("  grillsense cloud monitor --mac {}", devices[0].mac);
     }
 
     Ok(())
@@ -431,7 +418,6 @@ async fn cmd_devices(token: &str) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn cmd_cloud_monitor(
-    token: &str,
     mac: &str,
     interval: u64,
     fahrenheit: bool,
@@ -443,7 +429,6 @@ async fn cmd_cloud_monitor(
     device_name: &str,
 ) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
-    client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
 
     let unit_label = if fahrenheit { "°F" } else { "°C" };
@@ -478,7 +463,6 @@ async fn cmd_cloud_monitor(
         // Spawn a display task that also polls + prints to console
         let display_client = {
             let mut c = cloud::CloudClient::new()?;
-            c.set_token(token.to_string());
             c.set_device_mac(mac.to_string());
             c
         };
@@ -562,9 +546,8 @@ async fn cmd_cloud_monitor(
     }
 }
 
-async fn cmd_cloud_set_alarm(token: &str, mac: &str, temp: f64) -> Result<()> {
+async fn cmd_cloud_set_alarm(mac: &str, temp: f64) -> Result<()> {
     let mut client = cloud::CloudClient::new()?;
-    client.set_token(token.to_string());
     client.set_device_mac(mac.to_string());
 
     client.set_alarm_temp(temp).await?;
