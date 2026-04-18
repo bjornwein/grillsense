@@ -491,7 +491,7 @@ async fn cmd_cloud_monitor(
                             .join(" | ")
                     };
                     let age = format_age(&temp);
-                    print!("\r[{now}] {online} | {channels}{age}    ");
+                    print!("\r\x1b[2K[{now}] {online} | {channels}{age}");
                     io::stdout().flush().ok();
                 }
                 tokio::time::sleep(interval_dur).await;
@@ -530,14 +530,14 @@ async fn cmd_cloud_monitor(
                     };
 
                     let age = format_age(&temp);
-                    print!("\r[{now}] {online} | {channels}{age}    ");
+                    print!("\r\x1b[2K[{now}] {online} | {channels}{age}");
                     io::stdout().flush().context("flush stdout")?;
                 }
                 Err(e) => {
                     consecutive_errors += 1;
                     // Reduce log spam: verbose for first 10, then every 10th
                     if consecutive_errors <= 10 || consecutive_errors.is_multiple_of(10) {
-                        eprint!("\r[error] {} (×{})                ", e, consecutive_errors);
+                        eprint!("\r\x1b[2K[error] {} (×{})", e, consecutive_errors);
                         io::stderr().flush().ok();
                     }
                 }
