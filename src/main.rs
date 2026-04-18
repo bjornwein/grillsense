@@ -1082,10 +1082,16 @@ async fn mqtt_proxy_publisher(
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
     ping_interval.tick().await; // consume the immediate first tick
 
+    // Track last packet time for offline detection
+    let mut last_packet = tokio::time::Instant::now();
+    let stale_timeout = Duration::from_secs(60);
+    let mut device_online = false;
+
     loop {
         tokio::select! {
             pkt = rx.recv() => {
                 let Some(pkt) = pkt else { break };
+                last_packet = tokio::time::Instant::now();
 
                 // Learn device address from incoming packets
                 if pkt.direction == udp::PacketDirection::DeviceToCloud {
@@ -1122,7 +1128,7 @@ async fn mqtt_proxy_publisher(
                         "temperature_ch4": temp_result.temperature_ch4,
                         "temperature_ch5": temp_result.temperature_ch5,
                         "temperature_ch6": temp_result.temperature_ch6,
-                        "is_online": temp_result.online(),
+                        "is_online": true,
                         "alarm_ch1": alarm_ch1,
                         "alarm_ch2": alarm_ch2,
                     })).unwrap();
@@ -1131,10 +1137,29 @@ async fn mqtt_proxy_publisher(
                         &config.state_topic(), state.as_bytes(), false,
                     );
                     writer.write_all(&packet).await?;
+
+                    // Mark online if not already
+                    if !device_online {
+                        let avail = mqtt::build_mqtt_publish(
+                            &config.availability_topic(), b"online", true,
+                        );
+                        writer.write_all(&avail).await?;
+                        device_online = true;
+                    }
                 }
             }
 
             _ = ping_interval.tick() => {
+                // Check for device staleness
+                if device_online && last_packet.elapsed() > stale_timeout {
+                    let avail = mqtt::build_mqtt_publish(
+                        &config.availability_topic(), b"offline", true,
+                    );
+                    writer.write_all(&avail).await?;
+                    device_online = false;
+                    eprintln!("[mqtt] Device offline (no packets for {stale_timeout:?})");
+                }
+
                 writer.write_all(&[0xC0, 0x00]).await?;
             }
 
